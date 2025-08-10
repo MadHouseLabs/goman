@@ -15,15 +15,15 @@ import (
 
 // initPromptModel represents the initialization prompt screen
 type initPromptModel struct {
-	width         int
-	height        int
-	initializing  bool
-	initialized   bool
-	spinner       spinner.Model
-	result        *setup.InitializeResult
-	err           error
-	startTime     time.Time
-	elapsedTime   time.Duration
+	width        int
+	height       int
+	initializing bool
+	initialized  bool
+	spinner      spinner.Model
+	result       *setup.InitializeResult
+	err          error
+	startTime    time.Time
+	elapsedTime  time.Duration
 }
 
 // keyMap for initialization prompt
@@ -47,7 +47,7 @@ func newInitPromptModel() initPromptModel {
 	s := spinner.New()
 	s.Spinner = spinner.Points
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00"))
-	
+
 	return initPromptModel{
 		spinner: s,
 	}
@@ -119,11 +119,11 @@ func (m initPromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.initialized = true
 		m.result = msg.result
 		m.err = msg.err
-		
+
 		if msg.err == nil && msg.result != nil {
 			// Save initialization status
 			saveInitStatus(msg.result)
-			
+
 			// Auto-transition to main TUI after 2 seconds
 			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
 				return transitionToMainMsg{}
@@ -186,7 +186,7 @@ func (m initPromptModel) View() string {
 	if m.initialized {
 		// Show completion message
 		title := titleStyle.Render("✓ Initialization Complete!")
-		
+
 		var details string
 		if m.result != nil {
 			details = "\n"
@@ -202,28 +202,28 @@ func (m initPromptModel) View() string {
 			if m.result.SSMProfileCreated {
 				details += successStyle.Render("✓") + " IAM roles configured\n"
 			}
-			
+
 			if len(m.result.Errors) > 0 {
 				details += "\n" + warningStyle.Render("Some warnings occurred:\n")
 				for _, err := range m.result.Errors {
 					details += fmt.Sprintf("  • %s\n", err)
 				}
 			}
-			
+
 			details += "\n\nStarting main interface..."
 		}
-		
+
 		// Left-align everything
 		content = lipgloss.JoinVertical(
 			lipgloss.Left,
 			title,
 			"\n"+details,
 		)
-		
+
 	} else if m.initializing {
 		// Show progress
 		title := titleStyle.Render("Initializing Goman Infrastructure")
-		
+
 		progress := fmt.Sprintf("%s Setting up AWS resources...\n\n", m.spinner.View())
 		progress += fmt.Sprintf("Time elapsed: %s\n\n", m.elapsedTime.Round(time.Second))
 		progress += "This may take a few minutes:\n"
@@ -231,20 +231,20 @@ func (m initPromptModel) View() string {
 		progress += "  • Deploying Lambda function\n"
 		progress += "  • Setting up DynamoDB table\n"
 		progress += "  • Configuring IAM roles"
-		
+
 		// Left-align everything
 		content = lipgloss.JoinVertical(
 			lipgloss.Left,
 			title,
 			"\n"+progress,
 		)
-		
+
 	} else {
 		// Show initialization prompt
 		title := titleStyle.Render("Welcome to Goman!")
-		
+
 		warning := warningStyle.Render("⚠ Infrastructure Not Initialized")
-		
+
 		description := `Goman needs to set up AWS infrastructure before you can manage clusters.
 
 This will create:
@@ -254,13 +254,13 @@ This will create:
   • IAM roles and policies
 
 Press 'i' or click the button below to begin initialization.`
-		
+
 		button := zone.Mark("init_button", buttonStyle.Render("Initialize Infrastructure"))
-		
+
 		help := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#606060")).
 			Render("\nPress 'q' to quit")
-		
+
 		// Left-align everything
 		content = lipgloss.JoinVertical(
 			lipgloss.Left,
@@ -274,7 +274,7 @@ Press 'i' or click the button below to begin initialization.`
 
 	// Center the box
 	box := boxStyle.Render(content)
-	
+
 	return lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
@@ -286,7 +286,7 @@ func (m initPromptModel) runInitialization() tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		result, err := setup.EnsureFullSetup(ctx)
-		
+
 		return initPromptCompleteMsg{
 			result: result,
 			err:    err,

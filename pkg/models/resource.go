@@ -17,10 +17,10 @@ type ClusterResource struct {
 	DeletionTimestamp *time.Time        `json:"deletionTimestamp,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
-	
+
 	// Spec - Desired State
 	Spec ClusterSpec `json:"spec"`
-	
+
 	// Status - Actual State
 	Status ClusterResourceStatus `json:"status"`
 }
@@ -30,7 +30,8 @@ type ClusterSpec struct {
 	Provider     string            `json:"provider"`
 	Region       string            `json:"region"`
 	InstanceType string            `json:"instanceType"`
-	NodeCount    int               `json:"nodeCount"`
+	MasterCount  int               `json:"masterCount"` // Number of master nodes (1 for dev, 3 for HA)
+	Mode         string            `json:"mode"`        // "developer" or "ha"
 	K3sVersion   string            `json:"k3sVersion"`
 	Network      NetworkConfig     `json:"network"`
 	Tags         map[string]string `json:"tags,omitempty"`
@@ -38,19 +39,19 @@ type ClusterSpec struct {
 
 // ClusterResourceStatus represents the observed state of a cluster
 type ClusterResourceStatus struct {
-	Phase              string              `json:"phase"`
-	ObservedGeneration int                 `json:"observedGeneration"`
-	Conditions         []Condition         `json:"conditions,omitempty"`
-	LastReconcileTime  *time.Time          `json:"lastReconcileTime,omitempty"`
-	
+	Phase              string      `json:"phase"`
+	ObservedGeneration int         `json:"observedGeneration"`
+	Conditions         []Condition `json:"conditions,omitempty"`
+	LastReconcileTime  *time.Time  `json:"lastReconcileTime,omitempty"`
+
 	// Actual infrastructure state
-	ClusterID      string              `json:"clusterId,omitempty"`
-	VpcID          string              `json:"vpcId,omitempty"`
-	SubnetIDs      []string            `json:"subnetIds,omitempty"`
-	SecurityGroups []string            `json:"securityGroups,omitempty"`
-	Instances      []InstanceStatus    `json:"instances,omitempty"`
-	APIEndpoint    string              `json:"apiEndpoint,omitempty"`
-	
+	ClusterID      string           `json:"clusterId,omitempty"`
+	VpcID          string           `json:"vpcId,omitempty"`
+	SubnetIDs      []string         `json:"subnetIds,omitempty"`
+	SecurityGroups []string         `json:"securityGroups,omitempty"`
+	Instances      []InstanceStatus `json:"instances,omitempty"`
+	APIEndpoint    string           `json:"apiEndpoint,omitempty"`
+
 	// Progress tracking
 	Message string `json:"message,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -78,20 +79,20 @@ type Condition struct {
 
 // Phases for cluster lifecycle
 const (
-	ClusterPhasePending       = "Pending"
-	ClusterPhaseProvisioning  = "Provisioning"
-	ClusterPhaseRunning       = "Running"
-	ClusterPhaseTerminating   = "Terminating"
-	ClusterPhaseFailed        = "Failed"
-	ClusterPhaseDeleting      = "Deleting"
+	ClusterPhasePending      = "Pending"
+	ClusterPhaseProvisioning = "Provisioning"
+	ClusterPhaseRunning      = "Running"
+	ClusterPhaseTerminating  = "Terminating"
+	ClusterPhaseFailed       = "Failed"
+	ClusterPhaseDeleting     = "Deleting"
 )
 
 // Condition types
 const (
-	ConditionReady        = "Ready"
-	ConditionProgressing  = "Progressing"
-	ConditionDegraded     = "Degraded"
-	ConditionAvailable    = "Available"
+	ConditionReady       = "Ready"
+	ConditionProgressing = "Progressing"
+	ConditionDegraded    = "Degraded"
+	ConditionAvailable   = "Available"
 )
 
 // ReconcileResult represents the result of a reconciliation

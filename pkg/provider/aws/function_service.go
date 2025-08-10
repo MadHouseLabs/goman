@@ -54,14 +54,14 @@ func (s *FunctionService) Initialize(ctx context.Context) error {
 func (s *FunctionService) DeployFunction(ctx context.Context, name string, packagePath string) error {
 	// For AWS provider, we expect the Lambda package to be at:
 	// build/lambda-aws-controller.zip
-	
+
 	// Check if AWS-specific package exists
 	awsPackagePath := packagePath
 	if !strings.Contains(packagePath, "aws") {
 		// Convert generic path to AWS-specific path
 		awsPackagePath = strings.Replace(packagePath, "lambda-controller.zip", "lambda-aws-controller.zip", 1)
 	}
-	
+
 	// Read the package
 	packageData, err := os.ReadFile(awsPackagePath)
 	if err != nil {
@@ -71,14 +71,14 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 			return fmt.Errorf("failed to read package (tried %s and %s): %w", awsPackagePath, packagePath, err)
 		}
 	}
-	
+
 	// Check package size - if over 50MB, upload to S3 first
 	var codeLocation types.FunctionCode
 	if len(packageData) > 50*1024*1024 { // 50MB limit for direct upload
 		// Upload to S3
 		bucketName := fmt.Sprintf("goman-%s", s.accountID)
 		keyName := fmt.Sprintf("lambda/%s.zip", name)
-		
+
 		_, err = s.s3Client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(keyName),
@@ -87,7 +87,7 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 		if err != nil {
 			return fmt.Errorf("failed to upload Lambda package to S3: %w", err)
 		}
-		
+
 		codeLocation = types.FunctionCode{
 			S3Bucket: aws.String(bucketName),
 			S3Key:    aws.String(keyName),
@@ -97,13 +97,13 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 			ZipFile: packageData,
 		}
 	}
-	
+
 	// Check if function exists
 	exists, err := s.FunctionExists(ctx, name)
 	if err != nil {
 		return fmt.Errorf("failed to check function existence: %w", err)
 	}
-	
+
 	if exists {
 		// Update existing function
 		if len(packageData) > 50*1024*1024 {
@@ -124,7 +124,7 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 		if err != nil {
 			return fmt.Errorf("failed to update function code: %w", err)
 		}
-		
+
 		// Update configuration
 		_, err = s.lambdaClient.UpdateFunctionConfiguration(ctx, &lambda.UpdateFunctionConfigurationInput{
 			FunctionName: aws.String(name),
@@ -132,7 +132,7 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 			MemorySize:   aws.Int32(512),
 			Environment: &types.Environment{
 				Variables: map[string]string{
-					"GOMAN_REGION": s.region,
+					"GOMAN_REGION":     s.region,
 					"GOMAN_ACCOUNT_ID": s.accountID,
 				},
 			},
@@ -149,7 +149,7 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 			}
 			s.roleArn = roleArn
 		}
-		
+
 		// Create new function
 		_, err = s.lambdaClient.CreateFunction(ctx, &lambda.CreateFunctionInput{
 			FunctionName: aws.String(name),
@@ -162,7 +162,7 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 			Description:  aws.String(fmt.Sprintf("Goman function: %s", name)),
 			Environment: &types.Environment{
 				Variables: map[string]string{
-					"GOMAN_REGION": s.region,
+					"GOMAN_REGION":     s.region,
 					"GOMAN_ACCOUNT_ID": s.accountID,
 				},
 			},
@@ -174,7 +174,7 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 		if err != nil {
 			return fmt.Errorf("failed to create function: %w", err)
 		}
-		
+
 		// Wait for function to be active
 		waiter := lambda.NewFunctionActiveV2Waiter(s.lambdaClient)
 		err = waiter.Wait(ctx, &lambda.GetFunctionInput{
@@ -183,14 +183,14 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 		if err != nil {
 			return fmt.Errorf("failed waiting for function to be active: %w", err)
 		}
-		
+
 		// Set up S3 trigger
 		err = s.setupS3Trigger(ctx, name)
 		if err != nil {
 			return fmt.Errorf("failed to setup S3 trigger: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -200,15 +200,15 @@ func (s *FunctionService) InvokeFunction(ctx context.Context, name string, paylo
 		FunctionName: aws.String(name),
 		Payload:      payload,
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to invoke function: %w", err)
 	}
-	
+
 	if result.FunctionError != nil {
 		return nil, fmt.Errorf("function error: %s", *result.FunctionError)
 	}
-	
+
 	return result.Payload, nil
 }
 
@@ -217,11 +217,11 @@ func (s *FunctionService) DeleteFunction(ctx context.Context, name string) error
 	_, err := s.lambdaClient.DeleteFunction(ctx, &lambda.DeleteFunctionInput{
 		FunctionName: aws.String(name),
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to delete function: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -230,7 +230,7 @@ func (s *FunctionService) FunctionExists(ctx context.Context, name string) (bool
 	_, err := s.lambdaClient.GetFunction(ctx, &lambda.GetFunctionInput{
 		FunctionName: aws.String(name),
 	})
-	
+
 	if err != nil {
 		// Check if it's a not found error
 		if isNotFoundError(err) {
@@ -238,7 +238,7 @@ func (s *FunctionService) FunctionExists(ctx context.Context, name string) (bool
 		}
 		return false, fmt.Errorf("failed to get function: %w", err)
 	}
-	
+
 	return true, nil
 }
 
@@ -248,7 +248,7 @@ func (s *FunctionService) GetFunctionURL(ctx context.Context, name string) (stri
 	urlConfig, err := s.lambdaClient.GetFunctionUrlConfig(ctx, &lambda.GetFunctionUrlConfigInput{
 		FunctionName: aws.String(name),
 	})
-	
+
 	if err != nil {
 		if isNotFoundError(err) {
 			// Create function URL
@@ -268,7 +268,7 @@ func (s *FunctionService) GetFunctionURL(ctx context.Context, name string) (stri
 		}
 		return "", fmt.Errorf("failed to get function URL: %w", err)
 	}
-	
+
 	return *urlConfig.FunctionUrl, nil
 }
 
@@ -276,12 +276,12 @@ func (s *FunctionService) GetFunctionURL(ctx context.Context, name string) (stri
 func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 	roleName := fmt.Sprintf("%s-%s", LambdaRolePrefix, s.accountID)
 	var roleArn string
-	
+
 	// Check if role exists
 	getRoleOutput, err := s.iamClient.GetRole(ctx, &iam.GetRoleInput{
 		RoleName: aws.String(roleName),
 	})
-	
+
 	if err == nil {
 		// Role exists, but we still need to ensure the policy is up to date
 		roleArn = *getRoleOutput.Role.Arn
@@ -290,7 +290,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 		// Role doesn't exist, we'll create it below
 		roleArn = ""
 	}
-	
+
 	// If role doesn't exist, create it
 	if roleArn == "" {
 		// Create trust policy for Lambda
@@ -306,12 +306,12 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 				},
 			},
 		}
-		
+
 		trustPolicyJSON, err := json.Marshal(trustPolicy)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal trust policy: %w", err)
 		}
-		
+
 		// Create the role
 		createRoleOutput, err := s.iamClient.CreateRole(ctx, &iam.CreateRoleInput{
 			RoleName:                 aws.String(roleName),
@@ -328,19 +328,19 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 				},
 			},
 		})
-		
+
 		if err != nil {
 			return "", fmt.Errorf("failed to create IAM role: %w", err)
 		}
-		
+
 		roleArn = *createRoleOutput.Role.Arn
 	}
-	
+
 	// Attach basic Lambda execution policy
 	policies := []string{
 		"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
 	}
-	
+
 	// Create and attach custom policy with least privilege
 	policyName := fmt.Sprintf("goman-lambda-policy-%s", s.accountID)
 	policyDocument := map[string]interface{}{
@@ -371,23 +371,36 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 				},
 				"Resource": fmt.Sprintf("arn:aws:dynamodb:%s:%s:table/goman-resource-locks", s.region, s.accountID),
 			},
-			// EC2 permissions for instance management
+			// EC2 permissions for instance management - split for least privilege
+			{
+				"Effect": "Allow",
+				"Action": []string{
+					"ec2:DescribeInstances",
+					"ec2:DescribeSecurityGroups",
+					"ec2:DescribeVpcs",
+					"ec2:DescribeSubnets",
+				},
+				"Resource": "*", // Read operations require wildcard
+			},
 			{
 				"Effect": "Allow",
 				"Action": []string{
 					"ec2:RunInstances",
 					"ec2:TerminateInstances",
-					"ec2:DescribeInstances",
-					"ec2:DescribeSecurityGroups",
 					"ec2:CreateSecurityGroup",
 					"ec2:AuthorizeSecurityGroupIngress",
 					"ec2:DeleteSecurityGroup",
-					"ec2:DescribeVpcs",
-					"ec2:DescribeSubnets",
 					"ec2:CreateTags",
 					"ec2:ModifyInstanceAttribute",
 				},
-				"Resource": "*",
+				"Resource": []string{
+					fmt.Sprintf("arn:aws:ec2:*:%s:instance/*", s.accountID),
+					fmt.Sprintf("arn:aws:ec2:*:%s:security-group/*", s.accountID),
+					fmt.Sprintf("arn:aws:ec2:*:%s:subnet/*", s.accountID),
+					fmt.Sprintf("arn:aws:ec2:*:%s:volume/*", s.accountID),
+					fmt.Sprintf("arn:aws:ec2:*:%s:network-interface/*", s.accountID),
+					fmt.Sprintf("arn:aws:ec2:*::image/*", s.accountID), // AMIs can be public
+				},
 			},
 			// IAM permissions for using instance profiles (not creating them)
 			{
@@ -409,18 +422,31 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 					"ssm:SendCommand",
 					"ssm:GetCommandInvocation",
 					"ssm:ListCommandInvocations",
+				},
+				"Resource": []string{
+					fmt.Sprintf("arn:aws:ssm:*:%s:*", s.accountID),
+					fmt.Sprintf("arn:aws:ec2:*:%s:instance/*", s.accountID),
+					"arn:aws:ssm:*::document/AWS-RunShellScript",
+				},
+			},
+			{
+				"Effect": "Allow",
+				"Action": []string{
 					"ssm:GetParameter",
 				},
-				"Resource": "*",
+				"Resource": []string{
+					"arn:aws:ssm:*::parameter/aws/service/canonical/ubuntu/*",
+					"arn:aws:ssm:*::parameter/aws/service/ami-amazon-linux-latest/*",
+				},
 			},
 		},
 	}
-	
+
 	policyJSON, err := json.Marshal(policyDocument)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal policy document: %w", err)
 	}
-	
+
 	// Try to create the policy first
 	policyArn := fmt.Sprintf("arn:aws:iam::%s:policy/%s", s.accountID, policyName)
 	createPolicyOutput, err := s.iamClient.CreatePolicy(ctx, &iam.CreatePolicyInput{
@@ -428,7 +454,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 		PolicyDocument: aws.String(string(policyJSON)),
 		Description:    aws.String("Least privilege policy for goman Lambda function"),
 	})
-	
+
 	if err != nil {
 		// Policy already exists, update it by creating a new version
 		if strings.Contains(err.Error(), "EntityAlreadyExists") {
@@ -436,7 +462,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 			listVersionsOutput, listErr := s.iamClient.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{
 				PolicyArn: aws.String(policyArn),
 			})
-			
+
 			if listErr == nil && listVersionsOutput.Versions != nil {
 				// AWS allows max 5 versions. Delete old non-default versions
 				for _, version := range listVersionsOutput.Versions {
@@ -451,18 +477,18 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 					}
 				}
 			}
-			
+
 			// Create new policy version
 			createPolicyVersionOutput, versionErr := s.iamClient.CreatePolicyVersion(ctx, &iam.CreatePolicyVersionInput{
 				PolicyArn:      aws.String(policyArn),
 				PolicyDocument: aws.String(string(policyJSON)),
 				SetAsDefault:   true,
 			})
-			
+
 			if versionErr != nil {
 				return "", fmt.Errorf("failed to create new policy version: %w", versionErr)
 			}
-			
+
 			log.Printf("Updated IAM policy %s to version %s", policyName, *createPolicyVersionOutput.PolicyVersion.VersionId)
 			policies = append(policies, policyArn)
 		} else {
@@ -472,7 +498,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 	} else {
 		policies = append(policies, *createPolicyOutput.Policy.Arn)
 	}
-	
+
 	for _, policyArn := range policies {
 		_, err = s.iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
 			RoleName:  aws.String(roleName),
@@ -482,17 +508,17 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("failed to attach policy %s: %w", policyArn, err)
 		}
 	}
-	
+
 	// Wait a bit for the role to be available
 	time.Sleep(10 * time.Second)
-	
+
 	return roleArn, nil
 }
 
 // setupS3Trigger sets up S3 event notification to trigger Lambda
 func (s *FunctionService) setupS3Trigger(ctx context.Context, functionName string) error {
 	bucketName := fmt.Sprintf("goman-%s", s.accountID)
-	
+
 	// Add permission for S3 to invoke the function
 	_, err := s.lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
 		FunctionName: aws.String(functionName),
@@ -501,14 +527,14 @@ func (s *FunctionService) setupS3Trigger(ctx context.Context, functionName strin
 		Principal:    aws.String("s3.amazonaws.com"),
 		SourceArn:    aws.String(fmt.Sprintf("arn:aws:s3:::%s", bucketName)),
 	})
-	
+
 	if err != nil {
 		// Permission might already exist
 		if !strings.Contains(err.Error(), "ResourceConflictException") {
 			return fmt.Errorf("failed to add S3 invoke permission: %w", err)
 		}
 	}
-	
+
 	// Get function ARN
 	functionConfig, err := s.lambdaClient.GetFunction(ctx, &lambda.GetFunctionInput{
 		FunctionName: aws.String(functionName),
@@ -516,14 +542,14 @@ func (s *FunctionService) setupS3Trigger(ctx context.Context, functionName strin
 	if err != nil {
 		return fmt.Errorf("failed to get function configuration: %w", err)
 	}
-	
+
 	// Set up S3 bucket notification
 	notificationConfig := &s3.PutBucketNotificationConfigurationInput{
 		Bucket: aws.String(bucketName),
 		NotificationConfiguration: &s3types.NotificationConfiguration{
 			LambdaFunctionConfigurations: []s3types.LambdaFunctionConfiguration{
 				{
-					Id:              aws.String("goman-state-changes"),
+					Id:                aws.String("goman-state-changes"),
 					LambdaFunctionArn: functionConfig.Configuration.FunctionArn,
 					Events: []s3types.Event{
 						s3types.EventS3ObjectCreatedPut,
@@ -547,12 +573,12 @@ func (s *FunctionService) setupS3Trigger(ctx context.Context, functionName strin
 			},
 		},
 	}
-	
+
 	_, err = s.s3Client.PutBucketNotificationConfiguration(ctx, notificationConfig)
 	if err != nil {
 		return fmt.Errorf("failed to set up S3 bucket notification: %w", err)
 	}
-	
+
 	return nil
 }
 

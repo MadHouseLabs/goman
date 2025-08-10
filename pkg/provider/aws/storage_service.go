@@ -31,22 +31,22 @@ func (s *StorageService) Initialize(ctx context.Context) error {
 		Bucket:  aws.String(s.bucketName),
 		MaxKeys: aws.Int32(1),
 	})
-	
+
 	if err == nil {
 		// Bucket exists and we can access it
 		return nil
 	}
-	
+
 	// If we can't list, try to check if bucket exists
 	_, headErr := s.client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(s.bucketName),
 	})
-	
+
 	if headErr == nil {
 		// Bucket exists
 		return nil
 	}
-	
+
 	// Only try to create if we're certain it doesn't exist
 	// In Lambda environment, we should not create buckets
 	// The bucket should be created during setup
@@ -60,11 +60,11 @@ func (s *StorageService) PutObject(ctx context.Context, key string, data []byte)
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(data),
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to put object: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -74,17 +74,17 @@ func (s *StorageService) GetObject(ctx context.Context, key string) ([]byte, err
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(key),
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
 	defer result.Body.Close()
-	
+
 	data, err := io.ReadAll(result.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read object: %w", err)
 	}
-	
+
 	return data, nil
 }
 
@@ -94,33 +94,33 @@ func (s *StorageService) DeleteObject(ctx context.Context, key string) error {
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(key),
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to delete object: %w", err)
 	}
-	
+
 	return nil
 }
 
 // ListObjects lists objects with a prefix
 func (s *StorageService) ListObjects(ctx context.Context, prefix string) ([]string, error) {
 	var keys []string
-	
+
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucketName),
 		Prefix: aws.String(prefix),
 	})
-	
+
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to list objects: %w", err)
 		}
-		
+
 		for _, obj := range page.Contents {
 			keys = append(keys, *obj.Key)
 		}
 	}
-	
+
 	return keys, nil
 }

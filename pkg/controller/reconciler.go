@@ -28,12 +28,12 @@ func NewReconciler(prov provider.Provider, owner string) (*Reconciler, error) {
 	if prov == nil {
 		return nil, fmt.Errorf("provider is required")
 	}
-	
+
 	if owner == "" {
 		// Generate unique owner ID
 		owner = fmt.Sprintf("reconciler-%s-%d", prov.Region(), time.Now().UnixNano())
 	}
-	
+
 	return &Reconciler{
 		provider: prov,
 		owner:    owner,
@@ -45,18 +45,18 @@ func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (
 	// Create overall timeout context for the entire reconciliation (10 minutes)
 	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer reconcileCancel()
-	
+
 	resourceID := fmt.Sprintf("cluster-%s", clusterName)
-	
+
 	// Try to acquire lock with 5 minute TTL
 	lockCtx, lockCancel := context.WithTimeout(reconcileCtx, 30*time.Second)
 	defer lockCancel()
-	
+
 	lockToken, err := r.provider.GetLockService().AcquireLock(lockCtx, resourceID, r.owner, 5*time.Minute)
 	if err != nil {
 		// Another controller is working on this cluster
 		log.Printf("Failed to acquire lock for %s: %v", resourceID, err)
-		
+
 		// Check if cluster is locked
 		locked, owner, _ := r.provider.GetLockService().IsLocked(ctx, resourceID)
 		if locked {
@@ -67,36 +67,36 @@ func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (
 				RequeueAfter: 30 * time.Second,
 			}, nil
 		}
-		
+
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
-	
+
 	// Ensure we release the lock when done
 	defer func() {
 		// Use a fresh context for lock release to ensure it happens even if main context is cancelled
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer releaseCancel()
-		
+
 		if err := r.provider.GetLockService().ReleaseLock(releaseCtx, resourceID, lockToken); err != nil {
 			log.Printf("Failed to release lock for %s: %v", resourceID, err)
 		}
 	}()
-	
-	log.Printf("Acquired lock for cluster %s (token: %s)", clusterName, lockToken)
-	
+
+	log.Printf("Acquired lock for cluster %s", clusterName)
+
 	// Load cluster resource from storage
 	resource, err := r.loadClusterResource(reconcileCtx, clusterName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load cluster resource: %w", err)
 	}
-	
+
 	// For long-running operations, periodically renew the lock
 	renewCtx, renewCancel := context.WithCancel(reconcileCtx)
 	defer renewCancel() // Cancel the renewal goroutine when done
-	
+
 	renewTicker := time.NewTicker(2 * time.Minute)
 	defer renewTicker.Stop()
-	
+
 	// Start lock renewal in background
 	renewDone := make(chan struct{})
 	go func() {
@@ -118,7 +118,7 @@ func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (
 			}
 		}
 	}()
-	
+
 	// Perform reconciliation based on phase
 	result, err := r.reconcileBasedOnPhase(reconcileCtx, resource)
 	if err != nil {
@@ -126,7 +126,7 @@ func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (
 		r.sendNotification(reconcileCtx, "error", fmt.Sprintf("Reconciliation failed for cluster %s: %v", clusterName, err))
 		return nil, err
 	}
-	
+
 	// Check if cluster was deleted (reconcileDeleting returns a special result)
 	// If deletion is complete, the files have already been removed by reconcileDeleting
 	// so we should NOT save the resource back
@@ -135,17 +135,17 @@ func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (
 		log.Printf("Cluster %s deletion completed, not saving resource", clusterName)
 		return result, nil
 	}
-	
+
 	// Save updated resource for all other phases
 	if err := r.saveClusterResource(reconcileCtx, resource); err != nil {
 		return nil, fmt.Errorf("failed to save cluster resource: %w", err)
 	}
-	
+
 	// Send success notification if cluster became ready
 	if resource.Status.Phase == models.ClusterPhaseRunning {
 		r.sendNotification(reconcileCtx, "success", fmt.Sprintf("Cluster %s is now running", clusterName))
 	}
-	
+
 	return result, nil
 }
 
@@ -170,10 +170,10 @@ func (r *Reconciler) reconcileBasedOnPhase(ctx context.Context, resource *models
 // reconcilePending starts provisioning
 func (r *Reconciler) reconcilePending(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
 	log.Printf("Starting provisioning for cluster %s", resource.Name)
-	
+
 	resource.Status.Phase = models.ClusterPhaseProvisioning
 	resource.Status.Message = "Starting infrastructure provisioning"
-	
+
 	return &models.ReconcileResult{
 		Requeue:      true,
 		RequeueAfter: 5 * time.Second,
@@ -183,23 +183,23 @@ func (r *Reconciler) reconcilePending(ctx context.Context, resource *models.Clus
 // reconcileProvisioning creates infrastructure
 func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
 	log.Printf("Provisioning infrastructure for cluster %s", resource.Name)
-	
+
 	// Get provider configuration
 	providerConfig := config.GetProviderConfig()
-	
+
 	// Use compute service to create instances
 	computeService := r.provider.GetComputeService()
-	
+
 	// First, check for existing instances for this cluster
 	existingInstances, err := computeService.ListInstances(ctx, map[string]string{
-		"tag:Cluster": resource.Name,
+		"tag:Cluster":         resource.Name,
 		"instance-state-name": "pending,running,stopping,stopped",
 	})
 	if err != nil {
 		log.Printf("Warning: failed to list existing instances: %v", err)
 		existingInstances = nil
 	}
-	
+
 	// Populate Status.Instances with existing instances
 	if len(existingInstances) > 0 && len(resource.Status.Instances) == 0 {
 		log.Printf("Found %d existing instances for cluster %s", len(existingInstances), resource.Name)
@@ -214,19 +214,26 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 			})
 		}
 	}
-	
-	// Ensure we have the right number of instances
+
+	// Ensure we have the right number of instances based on mode
+	// Get master count from the spec (mode-based)
+	masterCount := resource.Spec.MasterCount
+	if masterCount == 0 {
+		// Default based on mode if not specified
+		masterCount = 1 // Default to developer mode
+	}
+
 	// Check each expected node individually to handle placeholders correctly
 	nodesToCreate := []string{}
-	for i := 0; i < resource.Spec.NodeCount; i++ {
-		nodeName := fmt.Sprintf("%s-node-%d", resource.Name, i)
-		
+	for i := 0; i < masterCount; i++ {
+		nodeName := fmt.Sprintf("%s-master-%d", resource.Name, i)
+
 		// Check if this node already exists in our state (including placeholders)
 		nodeInState := false
 		for _, inst := range resource.Status.Instances {
 			if inst.Name == nodeName {
 				nodeInState = true
-				// If it's a placeholder without instance ID, check if it now exists in AWS
+				// If it's a placeholder without instance ID, check if it now exists in the cloud provider
 				if inst.InstanceID == "" || inst.State == "initiating" {
 					for _, awsInst := range existingInstances {
 						if awsInst.Name == nodeName {
@@ -248,13 +255,13 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 				break
 			}
 		}
-		
+
 		if !nodeInState {
-			// Check if this node exists in AWS
-			nodeInAWS := false
+			// Check if this node exists in the cloud provider
+			nodeInCloud := false
 			for _, awsInst := range existingInstances {
 				if awsInst.Name == nodeName {
-					log.Printf("Instance %s already exists in AWS, adding to state", nodeName)
+					log.Printf("Instance %s already exists in cloud provider, adding to state", nodeName)
 					resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
 						InstanceID: awsInst.ID,
 						Name:       awsInst.Name,
@@ -263,12 +270,12 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 						PublicIP:   awsInst.PublicIP,
 						LaunchTime: awsInst.LaunchTime,
 					})
-					nodeInAWS = true
+					nodeInCloud = true
 					break
 				}
 			}
-			
-			if !nodeInAWS {
+
+			if !nodeInCloud {
 				// Need to create this node - add placeholder first
 				log.Printf("Adding placeholder for instance %s", nodeName)
 				resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
@@ -283,9 +290,9 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 			}
 		}
 	}
-	
+
 	if len(nodesToCreate) > 0 {
-		
+
 		// Save state with placeholders to prevent duplicate creation
 		if len(nodesToCreate) > 0 {
 			log.Printf("Saving state with %d placeholder nodes", len(nodesToCreate))
@@ -293,52 +300,52 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 				log.Printf("Failed to save state with placeholders: %v", err)
 				return nil, err
 			}
-			
+
 			// Now create instances synchronously (no goroutines needed)
-			// AWS RunInstances returns immediately with instance in "pending" state
+			// Cloud provider typically returns immediately with instance in "pending" state
 			log.Printf("Creating %d instances", len(nodesToCreate))
 			instancesCreated := false
-			
+
 			for _, nodeName := range nodesToCreate {
 				log.Printf("Creating instance %s", nodeName)
-				
+
 				instanceConfig := provider.InstanceConfig{
 					Name:         nodeName,
 					Region:       resource.Spec.Region, // Honor the region from cluster spec
 					InstanceType: resource.Spec.InstanceType,
-					ImageID:      providerConfig.GetAWSAMI(),
-					// No KeyName needed - using Systems Manager instead
+					ImageID:      providerConfig.GetProviderImageID(r.provider.Name()),
+					// No KeyName needed - using Systems Manager or equivalent
 					Tags: map[string]string{
-						"Cluster":    resource.Name,
-						"ManagedBy":  "goman",
-						"Provider":   r.provider.Name(),
+						"Cluster":   resource.Name,
+						"ManagedBy": "goman",
+						"Provider":  r.provider.Name(),
 					},
 				}
-				
+
 				// Use normal context with reasonable timeout (30s is enough for RunInstances)
 				instanceCtx, instanceCancel := context.WithTimeout(ctx, 30*time.Second)
-				
+
 				instance, err := computeService.CreateInstance(instanceCtx, instanceConfig)
 				instanceCancel()
-				
+
 				if err != nil {
 					log.Printf("Failed to create instance %s: %v", nodeName, err)
 					// Continue trying other instances
 				} else {
 					log.Printf("Successfully initiated creation of instance %s (ID: %s)", nodeName, instance.ID)
-					
+
 					// Update the placeholder with the real instance ID
 					for i, inst := range resource.Status.Instances {
 						if inst.Name == nodeName {
 							resource.Status.Instances[i].InstanceID = instance.ID
-							resource.Status.Instances[i].State = "pending" // AWS state
+							resource.Status.Instances[i].State = provider.InstanceStatePending
 							break
 						}
 					}
 					instancesCreated = true
 				}
 			}
-			
+
 			// Save the updated state with real instance IDs
 			if instancesCreated {
 				log.Printf("Saving state with real instance IDs")
@@ -347,14 +354,14 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 				}
 			}
 		}
-		
+
 		// Always requeue to check instance status
 		return &models.ReconcileResult{
 			Requeue:      true,
 			RequeueAfter: 15 * time.Second, // Check frequently during provisioning
 		}, nil
 	}
-	
+
 	// Check if all instances are running
 	allRunning := true
 	for _, inst := range resource.Status.Instances {
@@ -363,7 +370,7 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 			break
 		}
 	}
-	
+
 	if !allRunning {
 		// Wait for instances to be ready
 		return &models.ReconcileResult{
@@ -371,38 +378,44 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 			RequeueAfter: 10 * time.Second,
 		}, nil
 	}
-	
+
 	// All instances ready, move to running
 	resource.Status.Phase = models.ClusterPhaseRunning
 	resource.Status.Message = "Cluster is running"
 	resource.Status.ObservedGeneration = resource.Generation
 	now := time.Now()
 	resource.Status.LastReconcileTime = &now
-	
+
 	return &models.ReconcileResult{}, nil
 }
 
 // reconcileRunning checks health and handles updates
 func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
 	log.Printf("Checking running cluster %s", resource.Name)
-	
+
 	// Check if spec changed
 	if resource.Generation != resource.Status.ObservedGeneration {
-		// Handle updates (e.g., scaling)
-		if len(resource.Status.Instances) != resource.Spec.NodeCount {
+		// Handle updates (e.g., mode change)
+		masterCount := 0
+		for _, inst := range resource.Status.Instances {
+			if inst.Role == "master" {
+				masterCount++
+			}
+		}
+		if masterCount != resource.Spec.MasterCount {
 			resource.Status.Phase = models.ClusterPhaseProvisioning
-			resource.Status.Message = "Scaling cluster"
+			resource.Status.Message = "Updating cluster configuration"
 			return &models.ReconcileResult{
 				Requeue:      true,
 				RequeueAfter: 5 * time.Second,
 			}, nil
 		}
 	}
-	
+
 	// Update last reconcile time
 	now := time.Now()
 	resource.Status.LastReconcileTime = &now
-	
+
 	// Periodic health check
 	return &models.ReconcileResult{
 		Requeue:      true,
@@ -420,39 +433,39 @@ func (r *Reconciler) reconcileFailed(ctx context.Context, resource *models.Clust
 // reconcileDeleting handles cluster deletion
 func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
 	log.Printf("Deleting cluster %s", resource.Name)
-	
+
 	computeService := r.provider.GetComputeService()
-	
-	// First, check if any instances still exist in AWS
+
+	// First, check if any instances still exist in the cloud provider
 	// Include the region in the filters if available
 	filters := map[string]string{
-		"tag:Cluster": resource.Name,
+		"tag:Cluster":         resource.Name,
 		"instance-state-name": "pending,running,stopping,stopped", // Don't include "terminated"
 	}
-	
+
 	// Add region filter if the cluster has a region specified
 	if resource.Spec.Region != "" {
 		filters["region"] = resource.Spec.Region
 		log.Printf("Checking for instances in region: %s", resource.Spec.Region)
 	}
-	
+
 	actualInstances, err := computeService.ListInstances(ctx, filters)
 	if err != nil {
 		log.Printf("Warning: failed to list instances for deletion check: %v", err)
 		// Continue with deletion anyway
 	}
-	
+
 	// Check if all instances are terminated
 	if len(actualInstances) == 0 {
 		log.Printf("All instances for cluster %s are terminated, cleaning up resources", resource.Name)
-		
+
 		// All instances are gone, clean up remaining resources
 		if cleaner, ok := r.provider.(ClusterCleaner); ok {
 			if err := cleaner.CleanupClusterResources(ctx, resource.Name); err != nil {
 				log.Printf("Warning: failed to cleanup cluster resources: %v", err)
 			}
 		}
-		
+
 		// Delete the resource from storage (single JSON file)
 		clusterKey := fmt.Sprintf("clusters/%s.json", resource.Name)
 		if err := r.provider.GetStorageService().DeleteObject(ctx, clusterKey); err != nil {
@@ -460,26 +473,26 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.Clu
 		} else {
 			log.Printf("Deleted cluster file for %s", resource.Name)
 		}
-		
+
 		log.Printf("Cluster %s deleted successfully", resource.Name)
 		return &models.ReconcileResult{}, nil // No requeue, deletion complete
 	}
-	
+
 	// Some instances still exist, initiate deletion for those not already terminating
 	log.Printf("Found %d instances still running for cluster %s", len(actualInstances), resource.Name)
-	
+
 	// Mark instances as terminating in our state
 	for i, inst := range resource.Status.Instances {
 		if inst.State != "terminating" && inst.State != "terminated" {
 			resource.Status.Instances[i].State = "terminating"
 		}
 	}
-	
+
 	// Save state to reflect terminating status
 	if err := r.saveClusterResource(ctx, resource); err != nil {
 		log.Printf("Warning: failed to save state during deletion: %v", err)
 	}
-	
+
 	// Fire off deletion requests for all instances (don't wait)
 	instancesDeleted := 0
 	for _, inst := range actualInstances {
@@ -488,16 +501,16 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.Clu
 			log.Printf("Instance %s is already %s, skipping deletion", inst.ID, inst.State)
 			continue
 		}
-		
+
 		log.Printf("Initiating deletion of instance %s", inst.ID)
 		instancesDeleted++
-		
+
 		// Fire and forget - don't wait for completion
 		go func(instanceID string) {
-			// Use background context so deletion continues even after Lambda returns
+			// Use background context so deletion continues even after function returns
 			deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer deleteCancel()
-			
+
 			if err := computeService.DeleteInstance(deleteCtx, instanceID); err != nil {
 				log.Printf("Failed to delete instance %s: %v", instanceID, err)
 			} else {
@@ -505,11 +518,11 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.Clu
 			}
 		}(inst.ID)
 	}
-	
+
 	if instancesDeleted > 0 {
 		log.Printf("Initiated deletion of %d instances for cluster %s", instancesDeleted, resource.Name)
 	}
-	
+
 	// Requeue to check deletion status
 	return &models.ReconcileResult{
 		Requeue:      true,
@@ -522,22 +535,22 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 	// Create a timeout context for loading (30 seconds)
 	loadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	
+
 	// Load from cluster file
 	// Format: clusters/{cluster-name}.json
 	storageKey := fmt.Sprintf("clusters/%s.json", name)
-	
+
 	data, err := r.provider.GetStorageService().GetObject(loadCtx, storageKey)
 	if err != nil {
 		return nil, fmt.Errorf("cluster %s not found in storage", name)
 	}
-	
+
 	// Parse the cluster state
 	var clusterState map[string]interface{}
 	if err := json.Unmarshal(data, &clusterState); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal cluster state: %w", err)
 	}
-	
+
 	// Convert to ClusterResource
 	return r.convertStateToResource(clusterState)
 }
@@ -548,13 +561,14 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 	if !ok {
 		return nil, fmt.Errorf("invalid state format: missing cluster")
 	}
-	
+
 	resource := &models.ClusterResource{
 		Name:      getStringFromMap(cluster, "name"),
 		Namespace: "default",
 		ClusterID: getStringFromMap(cluster, "id"),
 		Spec: models.ClusterSpec{
-			NodeCount:    1, // Default, will be updated from nodes
+			MasterCount:  1,           // Default, will be updated from nodes or mode
+			Mode:         "developer", // Default mode
 			InstanceType: "t3.medium",
 		},
 		Status: models.ClusterResourceStatus{
@@ -563,10 +577,21 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 		},
 		Generation: 1,
 	}
-	
+
+	// Extract mode from cluster
+	if mode := getStringFromMap(cluster, "mode"); mode != "" {
+		resource.Spec.Mode = mode
+		// Set master count based on mode
+		if mode == "ha" {
+			resource.Spec.MasterCount = 3
+		} else {
+			resource.Spec.MasterCount = 1
+		}
+	}
+
 	// Extract master nodes to get node count, instance type, and region
 	if masterNodes, ok := cluster["master_nodes"].([]interface{}); ok && len(masterNodes) > 0 {
-		resource.Spec.NodeCount = len(masterNodes)
+		resource.Spec.MasterCount = len(masterNodes)
 		if node, ok := masterNodes[0].(map[string]interface{}); ok {
 			if instanceType := getStringFromMap(node, "instance_type"); instanceType != "" {
 				resource.Spec.InstanceType = instanceType
@@ -577,24 +602,17 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 			}
 		}
 	} else {
-		// If no master nodes yet, check for node_count in cluster config
-		if nodeCount, ok := cluster["node_count"].(float64); ok {
-			resource.Spec.NodeCount = int(nodeCount)
-		} else {
-			resource.Spec.NodeCount = 1 // Default to 1
-		}
-		
 		// Check for instance_type in cluster config
 		if instanceType := getStringFromMap(cluster, "instance_type"); instanceType != "" {
 			resource.Spec.InstanceType = instanceType
 		}
-		
+
 		// Check for region in cluster config
 		if region := getStringFromMap(cluster, "region"); region != "" {
 			resource.Spec.Region = region
 		}
 	}
-	
+
 	// Set status based on cluster status
 	if status := getStringFromMap(cluster, "status"); status != "" {
 		switch status {
@@ -610,7 +628,7 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 			resource.Status.Phase = models.ClusterPhasePending
 		}
 	}
-	
+
 	// Extract instance IDs from state
 	if instanceIDs, ok := state["instance_ids"].(map[string]interface{}); ok {
 		for nodeName, instanceID := range instanceIDs {
@@ -623,14 +641,14 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 			}
 		}
 	}
-	
+
 	// Check for deletion timestamp in metadata
 	if metadata, ok := state["metadata"].(map[string]interface{}); ok {
 		if deletionRequested, ok := metadata["deletion_requested"]; ok {
 			// Cluster is marked for deletion
 			resource.Status.Phase = models.ClusterPhaseDeleting
 			resource.Status.Message = fmt.Sprintf("Deletion requested at %v", deletionRequested)
-			
+
 			// Set DeletionTimestamp if available
 			if deletionTime, ok := deletionRequested.(string); ok {
 				if t, err := time.Parse(time.RFC3339, deletionTime); err == nil {
@@ -639,7 +657,7 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 			}
 		}
 	}
-	
+
 	return resource, nil
 }
 
@@ -672,11 +690,11 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 	// Create a timeout context for saving (30 seconds)
 	saveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	
+
 	// Save cluster state as single JSON file
 	stateKey := fmt.Sprintf("clusters/%s.json", resource.Name)
 	existingData, err := r.provider.GetStorageService().GetObject(saveCtx, stateKey)
-	
+
 	var clusterState map[string]interface{}
 	if err == nil {
 		// Parse existing state
@@ -685,29 +703,31 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 		// Create new state structure
 		clusterState = make(map[string]interface{})
 	}
-	
+
 	// Update cluster information
 	if cluster, ok := clusterState["cluster"].(map[string]interface{}); ok {
 		// Update existing cluster
 		cluster["status"] = mapPhaseToStatus(resource.Status.Phase)
 		cluster["updated_at"] = time.Now().Format(time.RFC3339)
+		cluster["mode"] = resource.Spec.Mode
 	} else {
 		// Create minimal cluster info
 		clusterState["cluster"] = map[string]interface{}{
 			"id":         resource.ClusterID,
 			"name":       resource.Name,
 			"status":     mapPhaseToStatus(resource.Status.Phase),
+			"mode":       resource.Spec.Mode,
 			"updated_at": time.Now().Format(time.RFC3339),
 		}
 	}
-	
+
 	// Update instance IDs
 	instanceIDs := make(map[string]string)
 	for _, inst := range resource.Status.Instances {
 		instanceIDs[inst.Name] = inst.InstanceID
 	}
 	clusterState["instance_ids"] = instanceIDs
-	
+
 	// Update metadata
 	if metadata, ok := clusterState["metadata"].(map[string]interface{}); ok {
 		metadata["last_reconciled"] = time.Now().Format(time.RFC3339)
@@ -718,7 +738,7 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 			"phase":           resource.Status.Phase,
 		}
 	}
-	
+
 	// Save updated state to individual file
 	updatedData, err := json.MarshalIndent(clusterState, "", "  ")
 	if err == nil {
@@ -726,7 +746,7 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 			log.Printf("Failed to save cluster state: %v", err)
 		}
 	}
-	
+
 	log.Printf("Saved cluster resource %s with phase %s", resource.Name, resource.Status.Phase)
 	return nil
 }
@@ -737,7 +757,7 @@ func (r *Reconciler) sendNotification(ctx context.Context, notificationType, mes
 	if notificationType == "error" {
 		topic = "goman-error-events"
 	}
-	
+
 	if err := r.provider.GetNotificationService().Publish(ctx, topic, message); err != nil {
 		log.Printf("Failed to send notification: %v", err)
 	}

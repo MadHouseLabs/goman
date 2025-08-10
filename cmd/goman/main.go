@@ -91,7 +91,7 @@ func initialModel() (model, error) {
 }
 
 func (m model) Init() tea.Cmd {
-	// Auto-sync from AWS on startup (infrastructure already initialized)
+	// Auto-sync from provider on startup (infrastructure already initialized)
 	return tea.Batch(
 		m.spinner.Tick,
 		tea.EnterAltScreen,
@@ -132,7 +132,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Pass mouse events to the form
 			if m.form != nil {
 				formCmd := m.form.Update(msg)
-				
+
 				// Check if form is submitted
 				if m.form.IsSubmitted() {
 					cluster := m.form.GetCluster()
@@ -140,11 +140,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.loadingMsg = fmt.Sprintf("Creating cluster %s...", cluster.Name)
 					return m, m.createCluster(cluster)
 				}
-				
+
 				return m, formCmd
 			}
 		}
-	
+
 	case tea.KeyMsg:
 		switch m.state {
 		case viewList:
@@ -182,7 +182,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case key.Matches(msg, m.keys.Sync):
 				m.loading = true
-				m.loadingMsg = "Syncing clusters from AWS..."
+				m.loadingMsg = "Syncing clusters from provider..."
 				return m, m.syncClusters()
 			}
 
@@ -194,11 +194,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.form = nil
 				return m, nil
 			}
-			
+
 			// Let the form handle the key event too
 			if m.form != nil {
 				formCmd := m.form.Update(msg)
-				
+
 				// Check if form is submitted
 				if m.form.IsSubmitted() {
 					cluster := m.form.GetCluster()
@@ -206,7 +206,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.loadingMsg = fmt.Sprintf("Creating cluster %s...", cluster.Name)
 					return m, m.createCluster(cluster)
 				}
-				
+
 				return m, formCmd
 			}
 
@@ -217,7 +217,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedCluster = nil
 				return m, nil
 			}
-		
+
 		case viewConfirmDelete:
 			switch msg.String() {
 			case "y", "Y":
@@ -353,7 +353,7 @@ func (m *model) deleteCluster(clusterID string) tea.Cmd {
 
 func (m *model) syncClusters() tea.Cmd {
 	return func() tea.Msg {
-		err := m.clusterManager.SyncFromAWS(m.config.AWSProfile, m.config.AWSRegion)
+		err := m.clusterManager.SyncFromProvider()
 		if err != nil {
 			return ui.ErrorMsg{Err: err}
 		}
@@ -379,7 +379,6 @@ func (m *model) clearError() tea.Cmd {
 	})
 }
 
-
 // startPolling starts continuous polling for cluster updates
 func (m *model) startPolling() tea.Cmd {
 	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
@@ -396,7 +395,7 @@ func main() {
 // runMainTUI runs the main TUI interface (called from CLI)
 func runMainTUI() {
 	zone.NewGlobal()
-	
+
 	m, err := initialModel()
 	if err != nil {
 		fmt.Printf("Error initializing: %v\n", err)

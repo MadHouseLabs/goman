@@ -9,9 +9,9 @@ import (
 
 // RetryConfig contains retry configuration
 type RetryConfig struct {
-	MaxAttempts int
-	InitialDelay time.Duration
-	MaxDelay     time.Duration
+	MaxAttempts       int
+	InitialDelay      time.Duration
+	MaxDelay          time.Duration
 	BackoffMultiplier float64
 }
 
@@ -32,7 +32,7 @@ type RetryableFunc func(ctx context.Context) error
 func RetryWithBackoff(ctx context.Context, config RetryConfig, fn RetryableFunc) error {
 	var lastErr error
 	delay := config.InitialDelay
-	
+
 	for attempt := 1; attempt <= config.MaxAttempts; attempt++ {
 		// Try the function
 		if err := fn(ctx); err == nil {
@@ -40,12 +40,12 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn RetryableFunc)
 		} else {
 			lastErr = err
 		}
-		
+
 		// Check if this was the last attempt
 		if attempt == config.MaxAttempts {
 			break
 		}
-		
+
 		// Wait before next attempt
 		select {
 		case <-ctx.Done():
@@ -53,14 +53,14 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn RetryableFunc)
 		case <-time.After(delay):
 			// Continue to next attempt
 		}
-		
+
 		// Calculate next delay with exponential backoff
 		delay = time.Duration(float64(delay) * config.BackoffMultiplier)
 		if delay > config.MaxDelay {
 			delay = config.MaxDelay
 		}
 	}
-	
+
 	return fmt.Errorf("failed after %d attempts: %w", config.MaxAttempts, lastErr)
 }
 
@@ -69,10 +69,10 @@ func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Add AWS-specific retryable error checks here
 	// For example: throttling errors, temporary network issues, etc.
-	
+
 	// For now, we'll consider certain error messages as retryable
 	errMsg := err.Error()
 	retryablePatterns := []string{
@@ -86,13 +86,13 @@ func IsRetryableError(err error) bool {
 		"ServiceUnavailable",
 		"RequestTimeout",
 	}
-	
+
 	for _, pattern := range retryablePatterns {
 		if contains(errMsg, pattern) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -108,7 +108,7 @@ func containsHelper(s, substr string) bool {
 	if len(s) < len(substr) {
 		return false
 	}
-	
+
 	// Simple case-insensitive contains
 	for i := 0; i <= len(s)-len(substr); i++ {
 		match := true
@@ -137,7 +137,7 @@ func ExponentialBackoff(attempt int, baseDelay time.Duration, maxDelay time.Dura
 	if attempt <= 0 {
 		return baseDelay
 	}
-	
+
 	delay := time.Duration(math.Pow(2, float64(attempt-1))) * baseDelay
 	if delay > maxDelay {
 		return maxDelay

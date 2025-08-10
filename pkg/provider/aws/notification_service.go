@@ -43,7 +43,7 @@ func (s *NotificationService) Initialize(ctx context.Context) error {
 		"goman-reconcile-events",
 		"goman-error-events",
 	}
-	
+
 	for _, topic := range topics {
 		arn, err := s.ensureTopic(ctx, topic)
 		if err != nil {
@@ -51,7 +51,7 @@ func (s *NotificationService) Initialize(ctx context.Context) error {
 		}
 		s.topicArns[topic] = arn
 	}
-	
+
 	return nil
 }
 
@@ -67,7 +67,7 @@ func (s *NotificationService) Publish(ctx context.Context, topic string, message
 		}
 		s.topicArns[topic] = arn
 	}
-	
+
 	// Publish message
 	_, err := s.snsClient.Publish(ctx, &sns.PublishInput{
 		TopicArn: aws.String(arn),
@@ -79,11 +79,11 @@ func (s *NotificationService) Publish(ctx context.Context, topic string, message
 			},
 		},
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -99,14 +99,14 @@ func (s *NotificationService) Subscribe(ctx context.Context, topic string) (stri
 		}
 		s.topicArns[topic] = arn
 	}
-	
+
 	// Create SQS queue for subscription
 	queueName := fmt.Sprintf("goman-sub-%s-%d", topic, time.Now().Unix())
 	queueURL, err := s.createQueue(ctx, queueName)
 	if err != nil {
 		return "", fmt.Errorf("failed to create queue: %w", err)
 	}
-	
+
 	// Get queue ARN
 	queueAttrs, err := s.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 		QueueUrl:       aws.String(queueURL),
@@ -115,9 +115,9 @@ func (s *NotificationService) Subscribe(ctx context.Context, topic string) (stri
 	if err != nil {
 		return "", fmt.Errorf("failed to get queue ARN: %w", err)
 	}
-	
+
 	queueArn := queueAttrs.Attributes["QueueArn"]
-	
+
 	// Subscribe queue to topic
 	subResult, err := s.snsClient.Subscribe(ctx, &sns.SubscribeInput{
 		TopicArn: aws.String(arn),
@@ -127,14 +127,14 @@ func (s *NotificationService) Subscribe(ctx context.Context, topic string) (stri
 			"RawMessageDelivery": "true",
 		},
 	})
-	
+
 	if err != nil {
 		return "", fmt.Errorf("failed to subscribe: %w", err)
 	}
-	
+
 	// Store subscription ID
 	s.queueURLs[*subResult.SubscriptionArn] = queueURL
-	
+
 	return *subResult.SubscriptionArn, nil
 }
 
@@ -144,11 +144,11 @@ func (s *NotificationService) Unsubscribe(ctx context.Context, subscriptionID st
 	_, err := s.snsClient.Unsubscribe(ctx, &sns.UnsubscribeInput{
 		SubscriptionArn: aws.String(subscriptionID),
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to unsubscribe: %w", err)
 	}
-	
+
 	// Delete associated queue if exists
 	if queueURL, ok := s.queueURLs[subscriptionID]; ok {
 		_, err = s.sqsClient.DeleteQueue(ctx, &sqs.DeleteQueueInput{
@@ -160,7 +160,7 @@ func (s *NotificationService) Unsubscribe(ctx context.Context, subscriptionID st
 		}
 		delete(s.queueURLs, subscriptionID)
 	}
-	
+
 	return nil
 }
 
@@ -171,13 +171,13 @@ func (s *NotificationService) ensureTopic(ctx context.Context, topicName string)
 	if err != nil {
 		return "", fmt.Errorf("failed to list topics: %w", err)
 	}
-	
+
 	for _, topic := range listResult.Topics {
 		if strings.Contains(*topic.TopicArn, topicName) {
 			return *topic.TopicArn, nil
 		}
 	}
-	
+
 	// Create topic
 	createResult, err := s.snsClient.CreateTopic(ctx, &sns.CreateTopicInput{
 		Name: aws.String(topicName),
@@ -188,11 +188,11 @@ func (s *NotificationService) ensureTopic(ctx context.Context, topicName string)
 			},
 		},
 	})
-	
+
 	if err != nil {
 		return "", fmt.Errorf("failed to create topic: %w", err)
 	}
-	
+
 	return *createResult.TopicArn, nil
 }
 
@@ -201,18 +201,18 @@ func (s *NotificationService) createQueue(ctx context.Context, queueName string)
 	result, err := s.sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
 		QueueName: aws.String(queueName),
 		Attributes: map[string]string{
-			"MessageRetentionPeriod": "86400",  // 1 day
-			"VisibilityTimeout":      "300",    // 5 minutes
+			"MessageRetentionPeriod": "86400", // 1 day
+			"VisibilityTimeout":      "300",   // 5 minutes
 		},
 		Tags: map[string]string{
 			"Application": "goman",
 			"Purpose":     "notification-subscription",
 		},
 	})
-	
+
 	if err != nil {
 		return "", fmt.Errorf("failed to create queue: %w", err)
 	}
-	
+
 	return *result.QueueUrl, nil
 }

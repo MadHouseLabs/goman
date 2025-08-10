@@ -32,15 +32,15 @@ func NewConfig() (*Config, error) {
 	}, nil
 }
 
-// LoadFromFile loads configuration from a file
+// LoadFromFile loads configuration from a file (not implemented - uses env vars)
 func LoadFromFile(path string) (*Config, error) {
-	// TODO: Implement loading from YAML/JSON file
+	// Configuration is managed through environment variables
 	return NewConfig()
 }
 
-// Save saves configuration to a file
+// Save saves configuration to a file (not implemented - uses env vars)
 func (c *Config) Save(path string) error {
-	// TODO: Implement saving to YAML/JSON file
+	// Configuration is managed through environment variables
 	return nil
 }
 

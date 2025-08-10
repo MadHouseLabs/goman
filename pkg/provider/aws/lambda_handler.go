@@ -31,54 +31,54 @@ type LambdaHandler struct {
 // NewLambdaHandler creates a new Lambda handler
 func NewLambdaHandler() (*LambdaHandler, error) {
 	log.Println("Creating Lambda handler...")
-	
+
 	// Create AWS provider directly (we're in AWS Lambda environment)
 	log.Println("Creating AWS provider...")
-	prov, err := NewProvider("", "")  // Will use defaults from environment
+	prov, err := NewProvider("", "") // Will use defaults from environment
 	if err != nil {
 		log.Printf("Failed to create provider: %v", err)
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
 	log.Println("Provider created successfully")
-	
+
 	// Initialize provider services
 	ctx := context.Background()
-	
+
 	// The lock service table should already exist (created during setup)
 	// Initialize will check if table exists and return early without trying to create it
 	if err := prov.GetLockService().Initialize(ctx); err != nil {
 		// Log the error but continue - the table should exist
 		log.Printf("Warning: Lock service initialization had an issue (table should exist): %v", err)
 	}
-	
+
 	// Initialize storage service
 	if err := prov.GetStorageService().Initialize(ctx); err != nil {
 		return nil, fmt.Errorf("failed to initialize storage service: %w", err)
 	}
-	
+
 	// Initialize notification service
 	if err := prov.GetNotificationService().Initialize(ctx); err != nil {
 		log.Printf("Warning: failed to initialize notification service: %v", err)
 	}
-	
+
 	// Note: Compute service initialization (SSM instance profile creation) is done
 	// during local setup, not in Lambda, as Lambda shouldn't have IAM create permissions
-	
+
 	// Generate unique owner ID for this Lambda instance
 	owner := fmt.Sprintf("lambda-%s-%d", prov.Region(), time.Now().UnixNano())
-	
+
 	// Create reconciler
 	reconciler, err := controller.NewReconciler(prov, owner)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create reconciler: %w", err)
 	}
-	
+
 	// Create storage for accessing cluster states
 	stor, err := storage.NewStorage()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
-	
+
 	return &LambdaHandler{
 		reconciler: reconciler,
 		storage:    stor,
@@ -89,14 +89,14 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 // HandleRequest processes Lambda events
 func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage) (*models.ReconcileResult, error) {
 	log.Printf("Received event: %s", string(event))
-	
+
 	// Try to parse as direct event first
 	var lambdaEvent LambdaEvent
 	if err := json.Unmarshal(event, &lambdaEvent); err == nil && lambdaEvent.ClusterName != "" {
 		// Direct invocation with cluster name
 		return h.reconciler.ReconcileCluster(ctx, lambdaEvent.ClusterName)
 	}
-	
+
 	// Try to parse as S3 event
 	var s3Event S3Event
 	if err := json.Unmarshal(event, &s3Event); err == nil && len(s3Event.Records) > 0 {
@@ -113,7 +113,7 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 			}
 		}
 	}
-	
+
 	// Try to parse as EventBridge EC2 event
 	var ec2Event EC2StateChangeEvent
 	if err := json.Unmarshal(event, &ec2Event); err == nil && ec2Event.DetailType == "EC2 Instance State-change Notification" {
@@ -121,26 +121,26 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 		instanceID := ec2Event.Detail.InstanceID
 		state := ec2Event.Detail.State
 		region := ec2Event.Region
-		
+
 		log.Printf("Processing EC2 state change event: instance %s in region %s changed to %s", instanceID, region, state)
-		
+
 		// Get the cluster owner from instance tags
 		clusterName, err := h.getClusterFromInstanceTags(ctx, instanceID, region)
 		if err != nil {
 			log.Printf("Failed to get cluster from instance tags: %v", err)
 			return nil, err
 		}
-		
+
 		if clusterName == "" {
 			log.Printf("Instance %s has no Cluster tag, ignoring state change to %s", instanceID, state)
 			return &models.ReconcileResult{}, nil
 		}
-		
-		log.Printf("Instance %s belongs to cluster %s (state: %s), triggering reconciliation", 
+
+		log.Printf("Instance %s belongs to cluster %s (state: %s), triggering reconciliation",
 			instanceID, clusterName, state)
 		return h.reconciler.ReconcileCluster(ctx, clusterName)
 	}
-	
+
 	return nil, fmt.Errorf("invalid event format or missing cluster name")
 }
 
@@ -182,7 +182,7 @@ func extractClusterName(key string) string {
 			return key[start:end]
 		}
 	}
-	
+
 	return ""
 }
 
@@ -191,7 +191,7 @@ func (h *LambdaHandler) getClusterFromInstanceTags(ctx context.Context, instance
 	// Get EC2 client for the specific region
 	computeService := h.provider.GetComputeService().(*ComputeService)
 	ec2Client := computeService.getEC2Client(region)
-	
+
 	// Describe the instance to get its tags
 	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceID},
@@ -199,21 +199,21 @@ func (h *LambdaHandler) getClusterFromInstanceTags(ctx context.Context, instance
 	if err != nil {
 		return "", fmt.Errorf("failed to describe instance %s in region %s: %w", instanceID, region, err)
 	}
-	
+
 	// Check if we found the instance
 	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
 		return "", fmt.Errorf("instance %s not found in region %s", instanceID, region)
 	}
-	
+
 	instance := result.Reservations[0].Instances[0]
-	
+
 	// Look for the Cluster tag
 	for _, tag := range instance.Tags {
 		if tag.Key != nil && *tag.Key == "Cluster" && tag.Value != nil {
 			return *tag.Value, nil
 		}
 	}
-	
+
 	// No Cluster tag found
 	return "", nil
 }
@@ -221,7 +221,7 @@ func (h *LambdaHandler) getClusterFromInstanceTags(ctx context.Context, instance
 // StartLambdaHandler starts the Lambda handler
 func StartLambdaHandler() {
 	log.Println("Starting Lambda handler...")
-	
+
 	// Add panic recovery
 	defer func() {
 		if r := recover(); r != nil {
@@ -229,7 +229,7 @@ func StartLambdaHandler() {
 			panic(r)
 		}
 	}()
-	
+
 	handler, err := NewLambdaHandler()
 	if err != nil {
 		log.Printf("ERROR: Failed to create handler: %v", err)
@@ -237,7 +237,7 @@ func StartLambdaHandler() {
 		// Instead, let the error propagate properly
 		panic(fmt.Sprintf("Failed to create handler: %v", err))
 	}
-	
+
 	log.Println("Handler created, starting Lambda runtime...")
 	lambda.Start(handler.HandleRequest)
 	log.Println("Lambda.Start returned (should not happen)")

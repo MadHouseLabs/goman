@@ -9,17 +9,17 @@ import (
 // ProviderConfig holds provider-specific configuration
 type ProviderConfig struct {
 	mu sync.RWMutex
-	
+
 	// AWS specific
-	AWSAMIID           string
-	AWSInstanceType    string
-	AWSKeyNamePrefix   string
-	
+	AWSAMIID         string
+	AWSInstanceType  string
+	AWSKeyNamePrefix string
+
 	// Common
-	DefaultNodeCount   int
-	DefaultK3sVersion  string
-	NetworkVPCCIDR     string
-	NetworkSubnetCIDR  string
+	DefaultNodeCount  int
+	DefaultK3sVersion string
+	NetworkVPCCIDR    string
+	NetworkSubnetCIDR string
 }
 
 var (
@@ -32,17 +32,17 @@ func GetProviderConfig() *ProviderConfig {
 	configOnce.Do(func() {
 		providerConfig = &ProviderConfig{
 			// AWS defaults
-			AWSAMIID:        getProviderEnvOrDefault("GOMAN_AWS_AMI_ID", ""),
-			AWSInstanceType: getProviderEnvOrDefault("GOMAN_AWS_INSTANCE_TYPE", "t3.medium"),
+			AWSAMIID:         getProviderEnvOrDefault("GOMAN_AWS_AMI_ID", ""),
+			AWSInstanceType:  getProviderEnvOrDefault("GOMAN_AWS_INSTANCE_TYPE", "t3.medium"),
 			AWSKeyNamePrefix: getProviderEnvOrDefault("GOMAN_AWS_KEY_PREFIX", "goman"),
-			
+
 			// Common defaults
 			DefaultNodeCount:  getEnvIntOrDefault("GOMAN_DEFAULT_NODE_COUNT", 3),
 			DefaultK3sVersion: getProviderEnvOrDefault("GOMAN_K3S_VERSION", "v1.28.5+k3s1"),
 			NetworkVPCCIDR:    getProviderEnvOrDefault("GOMAN_VPC_CIDR", "10.0.0.0/16"),
 			NetworkSubnetCIDR: getProviderEnvOrDefault("GOMAN_SUBNET_CIDR", "10.0.1.0/24"),
 		}
-		
+
 		// Auto-detect AMI if not set
 		if providerConfig.AWSAMIID == "" {
 			providerConfig.AWSAMIID = getDefaultAMIForRegion(GetAWSRegion())
@@ -62,11 +62,11 @@ func getDefaultAMIForRegion(region string) string {
 		"eu-west-1":      "ami-0694d931cee176e7d", // Ireland
 		"ap-southeast-1": "ami-0df7a207adb9748c7", // Singapore
 	}
-	
+
 	if ami, ok := amiMap[region]; ok {
 		return ami
 	}
-	
+
 	// Fallback to a generic AMI ID that user must override
 	return "ami-ubuntu-22.04"
 }
@@ -91,32 +91,47 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 	return defaultValue
 }
 
-// GetAWSAMI returns the configured AMI ID for AWS
-func (c *ProviderConfig) GetAWSAMI() string {
+// GetProviderImageID returns the configured image ID for the specified provider
+func (c *ProviderConfig) GetProviderImageID(providerType string) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.AWSAMIID
+
+	switch providerType {
+	case "aws":
+		return c.AWSAMIID
+	default:
+		return ""
+	}
 }
 
-// SetAWSAMI sets the AMI ID for AWS (mainly for testing)
-func (c *ProviderConfig) SetAWSAMI(ami string) {
+// GetAWSAMI returns the configured AMI ID for AWS (deprecated, use GetProviderImageID)
+func (c *ProviderConfig) GetAWSAMI() string {
+	return c.GetProviderImageID("aws")
+}
+
+// SetProviderImageID sets the image ID for the specified provider
+func (c *ProviderConfig) SetProviderImageID(providerType, imageID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.AWSAMIID = ami
+
+	switch providerType {
+	case "aws":
+		c.AWSAMIID = imageID
+	}
 }
 
 // Validate checks if the configuration is valid
 func (c *ProviderConfig) Validate() error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	
+
 	if c.AWSAMIID == "" || c.AWSAMIID == "ami-ubuntu-22.04" {
 		return fmt.Errorf("AWS AMI ID not configured. Please set GOMAN_AWS_AMI_ID environment variable")
 	}
-	
+
 	if c.DefaultNodeCount < 1 {
 		return fmt.Errorf("invalid node count: %d", c.DefaultNodeCount)
 	}
-	
+
 	return nil
 }

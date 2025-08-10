@@ -1,10 +1,12 @@
 # Binaries
-goman
+/goman
 build/
 *.exe
 *.dll
 *.so
 *.dylib
+bootstrap
+/lambda/controller/bootstrap
 
 # Test binary, built with `go test -c`
 *.test

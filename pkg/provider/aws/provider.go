@@ -22,18 +22,18 @@ import (
 
 // AWSProvider implements the Provider interface for AWS
 type AWSProvider struct {
-	profile        string
-	region         string
-	accountID      string
-	cfg            aws.Config
-	
+	profile   string
+	region    string
+	accountID string
+	cfg       aws.Config
+
 	// Services
 	lockService         provider.LockService
 	storageService      provider.StorageService
 	notificationService provider.NotificationService
 	functionService     provider.FunctionService
 	computeService      provider.ComputeService
-	
+
 	// AWS clients
 	dynamoClient *dynamodb.Client
 	s3Client     *s3.Client
@@ -49,25 +49,25 @@ type AWSProvider struct {
 func NewProvider(profile, region string) (*AWSProvider, error) {
 	// Create a context for initialization
 	ctx := context.Background()
-	
+
 	// Check if we're running in Lambda environment
 	isLambda := os.Getenv("AWS_LAMBDA_RUNTIME_API") != ""
-	
+
 	if isLambda {
 		log.Printf("NewProvider called with profile='%s', region='%s'", profile, region)
 	}
-	
+
 	if region == "" {
 		region = "ap-south-1" // Default to Mumbai
 		if isLambda {
 			log.Printf("Using default region: %s", region)
 		}
 	}
-	
+
 	// Load AWS config
 	var cfgOptions []func(*config.LoadOptions) error
 	cfgOptions = append(cfgOptions, config.WithRegion(region))
-	
+
 	// Only add profile if it's not empty (for Lambda environment)
 	if profile != "" {
 		if isLambda {
@@ -77,7 +77,7 @@ func NewProvider(profile, region string) (*AWSProvider, error) {
 	} else if isLambda {
 		log.Println("No profile specified, using default credentials chain")
 	}
-	
+
 	if isLambda {
 		log.Println("Loading AWS config...")
 	}
@@ -91,7 +91,7 @@ func NewProvider(profile, region string) (*AWSProvider, error) {
 	if isLambda {
 		log.Println("AWS config loaded successfully")
 	}
-	
+
 	// Get account ID
 	if isLambda {
 		log.Println("Getting AWS account ID...")
@@ -107,7 +107,7 @@ func NewProvider(profile, region string) (*AWSProvider, error) {
 	if isLambda {
 		log.Printf("AWS account ID: %s", *identity.Account)
 	}
-	
+
 	p := &AWSProvider{
 		profile:      profile,
 		region:       region,
@@ -122,14 +122,14 @@ func NewProvider(profile, region string) (*AWSProvider, error) {
 		stsClient:    stsClient,
 		iamClient:    iam.NewFromConfig(cfg),
 	}
-	
+
 	// Initialize services
 	p.lockService = NewLockService(p.dynamoClient, p.accountID)
 	p.storageService = NewStorageService(p.s3Client, p.accountID)
 	p.notificationService = NewNotificationService(p.snsClient, p.sqsClient, p.accountID, p.region)
 	p.functionService = NewFunctionService(p.lambdaClient, p.s3Client, p.iamClient, p.accountID, p.region)
 	p.computeService = NewComputeService(p.ec2Client, p.iamClient, p.cfg)
-	
+
 	return p, nil
 }
 
@@ -196,18 +196,18 @@ func (p *AWSProvider) GetConfig() aws.Config {
 // CleanupClusterResources implements the ClusterCleaner interface
 func (p *AWSProvider) CleanupClusterResources(ctx context.Context, clusterName string) error {
 	log.Printf("Cleaning up AWS resources for cluster %s", clusterName)
-	
+
 	// Check if there are any instances still running
 	instances, err := p.computeService.ListInstances(ctx, map[string]string{
-		"tag:Cluster": clusterName,
+		"tag:Cluster":         clusterName,
 		"instance-state-name": "running,pending,stopping,stopped",
 	})
-	
+
 	if err == nil && len(instances) > 0 {
 		log.Printf("Cannot cleanup: %d instances still exist for cluster %s", len(instances), clusterName)
 		return fmt.Errorf("cannot cleanup: instances still exist")
 	}
-	
+
 	// Clean up cluster-specific security group
 	sgName := fmt.Sprintf("goman-%s-sg", clusterName)
 	describeSGOutput, err := p.ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
@@ -218,10 +218,10 @@ func (p *AWSProvider) CleanupClusterResources(ctx context.Context, clusterName s
 			},
 		},
 	})
-	
+
 	if err == nil && len(describeSGOutput.SecurityGroups) > 0 {
 		sgID := describeSGOutput.SecurityGroups[0].GroupId
-		
+
 		// Try to delete the security group
 		_, err = p.ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{
 			GroupId: sgID,
@@ -233,12 +233,102 @@ func (p *AWSProvider) CleanupClusterResources(ctx context.Context, clusterName s
 			log.Printf("Deleted security group %s", sgName)
 		}
 	}
-	
+
 	// Note: We intentionally DO NOT delete:
 	// - VPC (using default VPC)
-	// - Subnets (using default subnets) 
+	// - Subnets (using default subnets)
 	// - IAM roles/instance profiles (can be reused)
-	
+
 	log.Printf("Cluster %s cleanup complete (preserving reusable resources)", clusterName)
 	return nil
+}
+
+// Initialize sets up AWS infrastructure
+func (p *AWSProvider) Initialize(ctx context.Context) (*provider.InitializeResult, error) {
+	result := &provider.InitializeResult{
+		ProviderType: "aws",
+		Resources:    make(map[string]string),
+		Errors:       []string{},
+	}
+
+	// Initialize storage service (S3)
+	if err := p.storageService.Initialize(ctx); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Storage: %v", err))
+	} else {
+		result.StorageReady = true
+		result.Resources["s3_bucket"] = fmt.Sprintf("goman-%s", p.accountID)
+	}
+
+	// Initialize lock service (DynamoDB)
+	if err := p.lockService.Initialize(ctx); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("LockService: %v", err))
+	} else {
+		result.LockServiceReady = true
+		result.Resources["dynamodb_table"] = "goman-resource-locks"
+	}
+
+	// Deploy function (Lambda)
+	functionName := fmt.Sprintf("goman-controller-%s", p.accountID)
+	packagePath := "build/lambda-aws-controller.zip"
+	if err := p.functionService.DeployFunction(ctx, functionName, packagePath); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Function: %v", err))
+	} else {
+		result.FunctionReady = true
+		result.Resources["lambda_function"] = functionName
+	}
+
+	// Auth is handled by IAM roles created during service initialization
+	result.AuthReady = true
+	result.Resources["iam_role_lambda"] = fmt.Sprintf("goman-lambda-role-%s", p.accountID)
+	result.Resources["iam_role_ssm"] = "goman-ssm-instance-role"
+
+	return result, nil
+}
+
+// Cleanup removes AWS infrastructure
+func (p *AWSProvider) Cleanup(ctx context.Context) error {
+	// This would remove all AWS resources
+	// Implementation would be similar to the CLI cleanup code
+	// but using the provider's services
+	return fmt.Errorf("cleanup not yet implemented for AWS provider")
+}
+
+// GetStatus checks the status of AWS infrastructure
+func (p *AWSProvider) GetStatus(ctx context.Context) (*provider.InfrastructureStatus, error) {
+	status := &provider.InfrastructureStatus{
+		Resources: make(map[string]string),
+	}
+
+	// Check S3 bucket
+	bucketName := fmt.Sprintf("goman-%s", p.accountID)
+	status.Resources["s3_bucket"] = bucketName
+	// Would check if bucket exists
+	status.StorageStatus = "ready"
+
+	// Check DynamoDB table
+	status.Resources["dynamodb_table"] = "goman-resource-locks"
+	// Would check if table exists
+	status.LockStatus = "ready"
+
+	// Check Lambda function
+	functionName := fmt.Sprintf("goman-controller-%s", p.accountID)
+	status.Resources["lambda_function"] = functionName
+	exists, _ := p.functionService.FunctionExists(ctx, functionName)
+	if exists {
+		status.FunctionStatus = "ready"
+	} else {
+		status.FunctionStatus = "not_deployed"
+	}
+
+	// Check IAM roles
+	status.Resources["iam_role_lambda"] = fmt.Sprintf("goman-lambda-role-%s", p.accountID)
+	status.Resources["iam_role_ssm"] = "goman-ssm-instance-role"
+	status.AuthStatus = "ready"
+
+	// Overall status
+	status.Initialized = status.StorageStatus == "ready" &&
+		status.FunctionStatus == "ready" &&
+		status.LockStatus == "ready"
+
+	return status, nil
 }

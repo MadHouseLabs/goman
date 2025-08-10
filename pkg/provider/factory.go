@@ -22,7 +22,7 @@ func NewFactory() *Factory {
 			provider = "aws" // Default to AWS for now
 		}
 	}
-	
+
 	region := os.Getenv("CLOUD_REGION")
 	if region == "" {
 		region = os.Getenv("AWS_REGION")
@@ -30,7 +30,7 @@ func NewFactory() *Factory {
 			region = "ap-south-1" // Default region
 		}
 	}
-	
+
 	return &Factory{
 		defaultProvider: provider,
 		defaultRegion:   region,
@@ -53,22 +53,22 @@ func DetectProviderFromEnvironment() string {
 	if provider := os.Getenv("CLOUD_PROVIDER"); provider != "" {
 		return provider
 	}
-	
+
 	// Check for AWS
 	if os.Getenv("AWS_PROFILE") != "" || os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != "" {
 		return "aws"
 	}
-	
+
 	// Check for GCP
 	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" || os.Getenv("GCP_PROJECT") != "" {
 		return "gcp"
 	}
-	
+
 	// Check for Azure
 	if os.Getenv("AZURE_SUBSCRIPTION_ID") != "" || os.Getenv("AZURE_TENANT_ID") != "" {
 		return "azure"
 	}
-	
+
 	// Default to AWS
 	return "aws"
 }
@@ -78,7 +78,7 @@ func GetFunctionPackagePath(providerType string) string {
 	if providerType == "" {
 		providerType = DetectProviderFromEnvironment()
 	}
-	
+
 	switch providerType {
 	case "aws":
 		return "build/lambda-aws-controller.zip"

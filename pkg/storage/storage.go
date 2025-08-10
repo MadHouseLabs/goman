@@ -28,16 +28,16 @@ func NewStorage() (*Storage, error) {
 	// Always use S3 storage with standard configuration
 	// In Lambda environment, don't use profile - use IAM role
 	profile := os.Getenv("AWS_PROFILE")
-	
+
 	backend, err := NewS3Backend(profile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 storage backend: %w", err)
 	}
-	
+
 	if err := backend.Initialize(); err != nil {
 		return nil, fmt.Errorf("failed to initialize S3 storage: %w", err)
 	}
-	
+
 	return &Storage{
 		backend: backend,
 	}, nil
@@ -48,7 +48,7 @@ func NewStorageWithBackend(backend StorageBackend) (*Storage, error) {
 	if err := backend.Initialize(); err != nil {
 		return nil, err
 	}
-	
+
 	return &Storage{
 		backend: backend,
 	}, nil

@@ -8,12 +8,12 @@ import (
 type ClusterStatus string
 
 const (
-	StatusRunning   ClusterStatus = "running"
-	StatusStopped   ClusterStatus = "stopped"
-	StatusCreating  ClusterStatus = "creating"
-	StatusDeleting  ClusterStatus = "deleting"
-	StatusUpdating  ClusterStatus = "updating"
-	StatusError     ClusterStatus = "error"
+	StatusRunning  ClusterStatus = "running"
+	StatusStopped  ClusterStatus = "stopped"
+	StatusCreating ClusterStatus = "creating"
+	StatusDeleting ClusterStatus = "deleting"
+	StatusUpdating ClusterStatus = "updating"
+	StatusError    ClusterStatus = "error"
 )
 
 // NodeRole represents the role of a node in the cluster
@@ -40,40 +40,63 @@ type Node struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// ClusterMode represents the deployment mode of the cluster
+type ClusterMode string
+
+const (
+	ModeDeveloper ClusterMode = "developer" // Single master node for development
+	ModeHA        ClusterMode = "ha"        // 3 master nodes for high availability
+)
+
 // K3sCluster represents a k3s Kubernetes cluster
 type K3sCluster struct {
-	ID               string        `json:"id"`
-	Name             string        `json:"name"`
-	Status           ClusterStatus `json:"status"`
-	K3sVersion       string        `json:"k3s_version"`
-	KubeVersion      string        `json:"kube_version"`
-	MasterNodes      []Node        `json:"master_nodes"`
-	WorkerNodes      []Node        `json:"worker_nodes"`
-	APIEndpoint      string        `json:"api_endpoint"`
-	ClusterToken     string        `json:"cluster_token"`
-	CreatedAt        time.Time     `json:"created_at"`
-	UpdatedAt        time.Time     `json:"updated_at"`
-	TotalCPU         int           `json:"total_cpu"`
-	TotalMemoryGB    int           `json:"total_memory_gb"`
-	TotalStorageGB   int           `json:"total_storage_gb"`
-	EstimatedCost    float64       `json:"estimated_cost"`
-	Tags             []string      `json:"tags"`
-	SSHKeyPath       string        `json:"ssh_key_path"`
-	KubeConfigPath   string        `json:"kubeconfig_path"`
-	NetworkCIDR      string        `json:"network_cidr"`
-	ServiceCIDR      string        `json:"service_cidr"`
-	ClusterDNS       string        `json:"cluster_dns"`
-	Features         K3sFeatures   `json:"features"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	Status         ClusterStatus `json:"status"`
+	Mode           ClusterMode   `json:"mode"`
+	Region         string        `json:"region"`
+	InstanceType   string        `json:"instance_type"`
+	K3sVersion     string        `json:"k3s_version"`
+	KubeVersion    string        `json:"kube_version"`
+	MasterNodes    []Node        `json:"master_nodes"`
+	WorkerNodes    []Node        `json:"worker_nodes"`
+	APIEndpoint    string        `json:"api_endpoint"`
+	ClusterToken   string        `json:"cluster_token"`
+	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      time.Time     `json:"updated_at"`
+	TotalCPU       int           `json:"total_cpu"`
+	TotalMemoryGB  int           `json:"total_memory_gb"`
+	TotalStorageGB int           `json:"total_storage_gb"`
+	EstimatedCost  float64       `json:"estimated_cost"`
+	Tags           []string      `json:"tags"`
+	SSHKeyPath     string        `json:"ssh_key_path"`
+	KubeConfigPath string        `json:"kubeconfig_path"`
+	NetworkCIDR    string        `json:"network_cidr"`
+	ServiceCIDR    string        `json:"service_cidr"`
+	ClusterDNS     string        `json:"cluster_dns"`
+	Features       K3sFeatures   `json:"features"`
+}
+
+// GetMasterCount returns the number of master nodes based on the cluster mode
+func (c *K3sCluster) GetMasterCount() int {
+	switch c.Mode {
+	case ModeHA:
+		return 3
+	case ModeDeveloper:
+		return 1
+	default:
+		return 1
+	}
 }
 
 // K3sFeatures represents optional k3s features
 type K3sFeatures struct {
-	Traefik          bool   `json:"traefik"`
-	ServiceLB        bool   `json:"servicelb"`
-	LocalStorage     bool   `json:"local_storage"`
-	MetricsServer    bool   `json:"metrics_server"`
-	CoreDNS          bool   `json:"coredns"`
-	FlannelBackend   string `json:"flannel_backend"`
+	Traefik        bool   `json:"traefik"`
+	ServiceLB      bool   `json:"servicelb"`
+	LocalStorage   bool   `json:"local_storage"`
+	MetricsServer  bool   `json:"metrics_server"`
+	CoreDNS        bool   `json:"coredns"`
+	FlannelBackend string `json:"flannel_backend"`
 }
 
 // ClusterConfig represents the user's input configuration for a cluster
@@ -82,7 +105,7 @@ type ClusterConfig struct {
 	Region       string            `yaml:"region"`
 	Provider     string            `yaml:"provider"`
 	Version      string            `yaml:"k3s_version"`
-	NodeCount    int               `yaml:"node_count"`
+	Mode         string            `yaml:"mode"`
 	InstanceType string            `yaml:"instance_type"`
 	Tags         map[string]string `yaml:"tags,omitempty"`
 	SSHKeyPath   string            `yaml:"ssh_key_path,omitempty"`

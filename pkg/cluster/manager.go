@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	setupOnce sync.Once
+	setupOnce      sync.Once
 	setupCompleted bool
-	setupErr error
+	setupErr       error
 )
 
 // Manager handles k3s cluster operations
@@ -61,7 +61,7 @@ func NewManager() *Manager {
 func (m *Manager) GetClusters() []models.K3sCluster {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	// Return a copy to prevent external modifications
 	result := make([]models.K3sCluster, len(m.clusters))
 	copy(result, m.clusters)
@@ -72,20 +72,20 @@ func (m *Manager) GetClusters() []models.K3sCluster {
 func ensureInfrastructureSetup() error {
 	setupOnce.Do(func() {
 		ctx := context.Background()
-		
+
 		// Run the full setup to ensure everything is configured
 		result, err := setup.EnsureFullSetup(ctx)
 		if err != nil {
 			setupErr = fmt.Errorf("infrastructure setup failed: %w", err)
 			return
 		}
-		
+
 		// Check if critical components are set up
 		if !result.S3BucketCreated {
 			setupErr = fmt.Errorf("S3 bucket setup failed")
 			return
 		}
-		
+
 		if !result.LambdaDeployed && len(result.Errors) > 0 {
 			// Lambda deployment failed, but we can continue
 			// The clusters will be created but won't be reconciled
@@ -95,10 +95,10 @@ func ensureInfrastructureSetup() error {
 				_ = errMsg
 			}
 		}
-		
+
 		setupCompleted = true
 	})
-	
+
 	return setupErr
 }
 
@@ -115,12 +115,12 @@ func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 	cluster.UpdatedAt = time.Now()
 	cluster.ClusterToken = fmt.Sprintf("K3S%d::server::%s", time.Now().Unix(), cluster.Name)
 	cluster.KubeConfigPath = fmt.Sprintf("~/.kube/k3s-%s.yaml", cluster.Name)
-	
+
 	// Set placeholder API endpoint if we have master nodes
 	if len(cluster.MasterNodes) > 0 {
 		cluster.APIEndpoint = fmt.Sprintf("https://%s:6443", cluster.MasterNodes[0].IP)
 	}
-	
+
 	// Calculate initial totals based on requested configuration
 	for _, node := range cluster.MasterNodes {
 		cluster.TotalCPU += node.CPU
@@ -132,38 +132,42 @@ func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 		cluster.TotalMemoryGB += node.MemoryGB
 		cluster.TotalStorageGB += node.StorageGB
 	}
-	
-	// Estimate cost
-	cluster.EstimatedCost = float64(len(cluster.MasterNodes)*50 + len(cluster.WorkerNodes)*30)
-	
+
+	// Estimate cost based on mode
+	masterCost := 50
+	if cluster.Mode == models.ModeHA {
+		masterCost = 150 // 3 masters
+	}
+	cluster.EstimatedCost = float64(masterCost + len(cluster.WorkerNodes)*30)
+
 	// Save initial state to storage FIRST before adding to memory
 	if m.storage != nil {
 		k3sState := &storage.K3sClusterState{
-			Cluster:        cluster,
-			InstanceIDs:    make(map[string]string),
-			VolumeIDs:      make(map[string][]string),
-			Metadata:       make(map[string]interface{}),
+			Cluster:     cluster,
+			InstanceIDs: make(map[string]string),
+			VolumeIDs:   make(map[string][]string),
+			Metadata:    make(map[string]interface{}),
 		}
 		k3sState.Metadata["created_at"] = time.Now()
 		k3sState.Metadata["reconcile_needed"] = true
-		
+
 		// Save state - this will trigger Lambda via S3 events
 		err := m.storage.SaveClusterState(k3sState)
 		if err != nil {
 			// Failed to save cluster state, return error
 			return nil, fmt.Errorf("failed to save cluster state: %w", err)
 		}
-		
+
 		// Also manually invoke Lambda to ensure it processes the cluster
 		// This is a backup in case S3 notifications aren't working
 		go m.invokeLambdaForCluster(cluster.Name)
 	}
-	
+
 	// Add to cluster list only after successful save
 	m.mu.Lock()
 	m.clusters = append(m.clusters, cluster)
 	m.mu.Unlock()
-	
+
 	return &cluster, nil
 }
 
@@ -173,15 +177,15 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 	if err := ensureInfrastructureSetup(); err != nil {
 		return fmt.Errorf("failed to ensure infrastructure setup: %w", err)
 	}
-	
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	for i := range m.clusters {
 		if m.clusters[i].ID == clusterID {
 			m.clusters[i].Status = models.StatusDeleting
 			m.clusters[i].UpdatedAt = time.Now()
-			
+
 			// Update state to mark as deleting
 			if m.storage != nil {
 				if state, err := m.storage.LoadClusterState(m.clusters[i].Name); err == nil {
@@ -192,7 +196,7 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 					}
 					state.Metadata["deletion_requested"] = time.Now()
 					state.Metadata["reconcile_needed"] = true
-					
+
 					// Save state - this will trigger Lambda via S3 events
 					err := m.storage.SaveClusterState(state)
 					if err != nil {
@@ -201,7 +205,7 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 					}
 				}
 			}
-			
+
 			return nil
 		}
 	}
@@ -212,7 +216,7 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 func (m *Manager) StartCluster(clusterID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	for i := range m.clusters {
 		if m.clusters[i].ID == clusterID {
 			if m.clusters[i].Status != models.StatusStopped {
@@ -230,7 +234,7 @@ func (m *Manager) StartCluster(clusterID string) error {
 func (m *Manager) StopCluster(clusterID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	for i := range m.clusters {
 		if m.clusters[i].ID == clusterID {
 			if m.clusters[i].Status != models.StatusRunning {
@@ -248,7 +252,7 @@ func (m *Manager) StopCluster(clusterID string) error {
 func (m *Manager) GetClusterByID(clusterID string) (*models.K3sCluster, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	for _, cluster := range m.clusters {
 		if cluster.ID == clusterID {
 			// Return a copy to prevent external modifications
@@ -259,24 +263,23 @@ func (m *Manager) GetClusterByID(clusterID string) (*models.K3sCluster, error) {
 	return nil, fmt.Errorf("cluster not found: %s", clusterID)
 }
 
-// SyncFromAWS syncs cluster state from AWS
-func (m *Manager) SyncFromAWS(profile, region string) error {
+// SyncFromProvider syncs cluster state from the cloud provider
+func (m *Manager) SyncFromProvider() error {
 	// Ensure infrastructure is set up before syncing
 	if err := ensureInfrastructureSetup(); err != nil {
 		return fmt.Errorf("failed to ensure infrastructure setup: %w", err)
 	}
-	
-	// In the Lambda architecture, syncing happens automatically
-	// through S3 state updates. This method could trigger a manual sync.
-	// Sync requested silently
-	
+
+	// In the serverless architecture, syncing happens automatically
+	// through storage updates. This method triggers a manual sync.
+
 	// Reload state from storage
 	if m.storage != nil {
 		states, err := m.storage.LoadAllClusterStates()
 		if err != nil {
 			return fmt.Errorf("failed to load cluster states: %w", err)
 		}
-		
+
 		m.mu.Lock()
 		m.clusters = []models.K3sCluster{}
 		for _, state := range states {
@@ -284,27 +287,32 @@ func (m *Manager) SyncFromAWS(profile, region string) error {
 		}
 		m.mu.Unlock()
 	}
-	
+
 	return nil
+}
+
+// SyncFromAWS syncs cluster state from AWS (deprecated, use SyncFromProvider)
+func (m *Manager) SyncFromAWS(profile, region string) error {
+	return m.SyncFromProvider()
 }
 
 // invokeLambdaForCluster manually invokes the Lambda function for a cluster
 func (m *Manager) invokeLambdaForCluster(clusterName string) {
 	ctx := context.Background()
-	
+
 	// Get the provider
 	prov, err := registry.GetDefaultProvider()
 	if err != nil {
 		// Silently continue
 		return
 	}
-	
+
 	// Get function service
 	functionService := prov.GetFunctionService()
-	
+
 	// Create payload
 	payload := fmt.Sprintf(`{"clusterName": "%s"}`, clusterName)
-	
+
 	// Invoke function - best effort, ignore errors
 	_, _ = functionService.InvokeFunction(ctx, "goman-cluster-controller", []byte(payload))
 }
@@ -318,10 +326,10 @@ func (m *Manager) RefreshClusterStatus() {
 			// Failed to refresh cluster status, continue silently
 			return
 		}
-		
+
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		
+
 		// Replace entire clusters slice with latest state
 		m.clusters = []models.K3sCluster{}
 		for _, state := range states {

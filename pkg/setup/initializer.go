@@ -20,18 +20,18 @@ import (
 
 // InitializeResult contains the results of initialization
 type InitializeResult struct {
-	S3BucketCreated      bool
-	LambdaDeployed       bool
-	DynamoDBCreated      bool
-	NotificationsSetup   bool
-	SSMProfileCreated    bool
-	Errors               []string
+	S3BucketCreated    bool
+	LambdaDeployed     bool
+	DynamoDBCreated    bool
+	NotificationsSetup bool
+	SSMProfileCreated  bool
+	Errors             []string
 }
 
 // EnsureFullSetup ensures all required AWS resources are properly configured
 func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
 	result := &InitializeResult{}
-	
+
 	// Step 1: Initialize storage (creates S3 bucket)
 	_, err := storage.NewStorage()
 	if err != nil {
@@ -39,33 +39,33 @@ func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
 		return result, fmt.Errorf("failed to initialize storage: %w", err)
 	}
 	result.S3BucketCreated = true
-	
+
 	// Step 2: Get the provider
 	provider, err := registry.GetDefaultProvider()
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Provider setup failed: %v", err))
 		return result, fmt.Errorf("failed to get provider: %w", err)
 	}
-	
+
 	// Step 3: Deploy Lambda function
 	functionService := provider.GetFunctionService()
-	
+
 	// Initialize function service (this creates IAM roles, etc.)
 	if err := functionService.Initialize(ctx); err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Function service init failed: %v", err))
 		return result, fmt.Errorf("failed to initialize function service: %w", err)
 	}
-	
+
 	// Get function package path
 	packagePath := registry.GetFunctionPackagePath(provider.Name())
 	functionName := "goman-cluster-controller"
-	
+
 	// Check if function exists
 	exists, err := functionService.FunctionExists(ctx, functionName)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Function check failed: %v", err))
 	}
-	
+
 	if !exists {
 		// Deploy the function (this also sets up S3 notifications)
 		if err := functionService.DeployFunction(ctx, functionName, packagePath); err != nil {
@@ -77,7 +77,7 @@ func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
 		}
 	} else {
 		result.LambdaDeployed = true
-		
+
 		// Ensure S3 notifications are set up even if Lambda exists
 		// This is important because the bucket might have been recreated
 		if err := ensureS3Notifications(ctx, provider); err != nil {
@@ -86,7 +86,7 @@ func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
 			result.NotificationsSetup = true
 		}
 	}
-	
+
 	// Step 4: Initialize lock service (creates DynamoDB table)
 	lockService := provider.GetLockService()
 	if err := lockService.Initialize(ctx); err != nil {
@@ -95,7 +95,7 @@ func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
 	} else {
 		result.DynamoDBCreated = true
 	}
-	
+
 	// Step 5: Initialize compute service (creates SSM instance profile)
 	// This needs to be done from local, not Lambda, because Lambda doesn't have
 	// permission to create IAM roles (and shouldn't have)
@@ -109,17 +109,17 @@ func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
 			}
 		}
 	}
-	
+
 	// Step 6: Set up EventBridge rule for EC2 instance state changes
 	if awsProvider, ok := provider.(*aws.AWSProvider); ok {
 		if err := setupEC2EventRule(ctx, awsProvider, functionName); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("EventBridge setup failed: %v", err))
 		}
 	}
-	
+
 	// Give AWS services a moment to stabilize
 	time.Sleep(2 * time.Second)
-	
+
 	return result, nil
 }
 
@@ -130,47 +130,47 @@ func ensureS3Notifications(ctx context.Context, provider interface{}) error {
 	if !ok {
 		return fmt.Errorf("provider is not AWS provider")
 	}
-	
+
 	functionService := awsProvider.GetFunctionService()
-	
+
 	// Get the Lambda function name
 	functionName := fmt.Sprintf("goman-cluster-controller")
-	
+
 	// Check if Lambda function exists
 	exists, err := functionService.FunctionExists(ctx, functionName)
 	if err != nil {
 		return fmt.Errorf("failed to check function existence: %w", err)
 	}
-	
+
 	if !exists {
 		return fmt.Errorf("Lambda function %s does not exist", functionName)
 	}
-	
+
 	// Set up S3 trigger for the function
 	// This will configure S3 bucket notifications to trigger Lambda on file changes
 	if err := setupS3BucketNotifications(ctx, awsProvider, functionName); err != nil {
 		return fmt.Errorf("failed to setup S3 notifications: %w", err)
 	}
-	
+
 	return nil
 }
 
 // setupS3BucketNotifications configures S3 to trigger Lambda on cluster file changes
 func setupS3BucketNotifications(ctx context.Context, provider *aws.AWSProvider, functionName string) error {
 	bucketName := fmt.Sprintf("goman-%s", provider.AccountID())
-	
+
 	// Get S3 client from provider
 	s3Client := provider.GetS3Client()
 	if s3Client == nil {
 		return fmt.Errorf("S3 client not available")
 	}
-	
+
 	// Get Lambda client from provider
 	lambdaClient := provider.GetLambdaClient()
 	if lambdaClient == nil {
 		return fmt.Errorf("Lambda client not available")
 	}
-	
+
 	// Add permission for S3 to invoke the Lambda function
 	_, err := lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
 		FunctionName: awssdk.String(functionName),
@@ -179,14 +179,14 @@ func setupS3BucketNotifications(ctx context.Context, provider *aws.AWSProvider, 
 		Principal:    awssdk.String("s3.amazonaws.com"),
 		SourceArn:    awssdk.String(fmt.Sprintf("arn:aws:s3:::%s", bucketName)),
 	})
-	
+
 	if err != nil {
 		// Permission might already exist, which is fine
 		if !strings.Contains(err.Error(), "ResourceConflictException") {
 			return fmt.Errorf("failed to add S3 invoke permission: %w", err)
 		}
 	}
-	
+
 	// Get function ARN
 	functionConfig, err := lambdaClient.GetFunction(ctx, &lambda.GetFunctionInput{
 		FunctionName: awssdk.String(functionName),
@@ -194,7 +194,7 @@ func setupS3BucketNotifications(ctx context.Context, provider *aws.AWSProvider, 
 	if err != nil {
 		return fmt.Errorf("failed to get function configuration: %w", err)
 	}
-	
+
 	// Configure S3 bucket notification
 	notificationConfig := &s3.PutBucketNotificationConfigurationInput{
 		Bucket: awssdk.String(bucketName),
@@ -226,12 +226,12 @@ func setupS3BucketNotifications(ctx context.Context, provider *aws.AWSProvider, 
 			},
 		},
 	}
-	
+
 	_, err = s3Client.PutBucketNotificationConfiguration(ctx, notificationConfig)
 	if err != nil {
 		return fmt.Errorf("failed to set up S3 bucket notification: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -240,22 +240,22 @@ func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionN
 	// Create EventBridge client
 	eventClient := eventbridge.NewFromConfig(provider.GetConfig())
 	lambdaClient := provider.GetLambdaClient()
-	
+
 	// Define the rule name
 	ruleName := "goman-ec2-state-change-rule"
-	
+
 	// Create event pattern for ALL EC2 instance state changes
 	eventPattern := map[string]interface{}{
 		"source":      []string{"aws.ec2"},
 		"detail-type": []string{"EC2 Instance State-change Notification"},
 		// No state filter - we want ALL state changes (running, stopped, stopping, terminated, terminating, pending, shutting-down)
 	}
-	
+
 	eventPatternJSON, err := json.Marshal(eventPattern)
 	if err != nil {
 		return fmt.Errorf("failed to marshal event pattern: %w", err)
 	}
-	
+
 	// Create or update the rule
 	_, err = eventClient.PutRule(ctx, &eventbridge.PutRuleInput{
 		Name:         awssdk.String(ruleName),
@@ -266,7 +266,7 @@ func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionN
 	if err != nil {
 		return fmt.Errorf("failed to create EventBridge rule: %w", err)
 	}
-	
+
 	// Get Lambda function ARN
 	functionConfig, err := lambdaClient.GetFunction(ctx, &lambda.GetFunctionInput{
 		FunctionName: awssdk.String(functionName),
@@ -274,7 +274,7 @@ func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionN
 	if err != nil {
 		return fmt.Errorf("failed to get Lambda function: %w", err)
 	}
-	
+
 	// Add Lambda permission for EventBridge to invoke the function
 	_, err = lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
 		FunctionName: awssdk.String(functionName),
@@ -286,7 +286,7 @@ func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionN
 	if err != nil && !strings.Contains(err.Error(), "ResourceConflictException") {
 		return fmt.Errorf("failed to add Lambda permission for EventBridge: %w", err)
 	}
-	
+
 	// Add Lambda as target for the rule
 	_, err = eventClient.PutTargets(ctx, &eventbridge.PutTargetsInput{
 		Rule: awssdk.String(ruleName),
@@ -300,6 +300,6 @@ func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionN
 	if err != nil {
 		return fmt.Errorf("failed to add Lambda target to EventBridge rule: %w", err)
 	}
-	
+
 	return nil
 }

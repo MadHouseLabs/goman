@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	LockTableName = "goman-resource-locks"
+	LockTableName    = "goman-resource-locks"
 	LockTTLAttribute = "expires_at"
 )
 
@@ -46,12 +46,12 @@ func (s *LockService) Initialize(ctx context.Context) error {
 	_, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(s.tableName),
 	})
-	
+
 	if err == nil {
 		// Table exists
 		return nil
 	}
-	
+
 	// Create table - only if we have permission
 	_, err = s.client.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName: aws.String(s.tableName),
@@ -79,21 +79,21 @@ func (s *LockService) Initialize(ctx context.Context) error {
 			},
 		},
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to create lock table: %w", err)
 	}
-	
+
 	// Wait for table to be active
 	waiter := dynamodb.NewTableExistsWaiter(s.client)
 	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(s.tableName),
 	}, 2*time.Minute)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed waiting for table to be active: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -101,7 +101,7 @@ func (s *LockService) Initialize(ctx context.Context) error {
 func (s *LockService) AcquireLock(ctx context.Context, resourceID string, owner string, ttl time.Duration) (string, error) {
 	token := uuid.New().String()
 	expiresAt := time.Now().Add(ttl).Unix()
-	
+
 	item := LockItem{
 		ResourceID: resourceID,
 		Owner:      owner,
@@ -109,22 +109,22 @@ func (s *LockService) AcquireLock(ctx context.Context, resourceID string, owner 
 		ExpiresAt:  expiresAt,
 		CreatedAt:  time.Now().Format(time.RFC3339),
 	}
-	
+
 	av, err := attributevalue.MarshalMap(item)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal lock item: %w", err)
 	}
-	
+
 	// Try to put item with condition that it doesn't exist or has expired
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(s.tableName),
-		Item:      av,
+		TableName:           aws.String(s.tableName),
+		Item:                av,
 		ConditionExpression: aws.String("attribute_not_exists(resource_id) OR expires_at < :now"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":now": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", time.Now().Unix())},
 		},
 	})
-	
+
 	if err != nil {
 		// Check if it's a conditional check failure
 		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
@@ -137,7 +137,7 @@ func (s *LockService) AcquireLock(ctx context.Context, resourceID string, owner 
 		}
 		return "", fmt.Errorf("failed to acquire lock: %w", err)
 	}
-	
+
 	return token, nil
 }
 
@@ -156,7 +156,7 @@ func (s *LockService) ReleaseLock(ctx context.Context, resourceID string, token 
 			":token": &types.AttributeValueMemberS{Value: token},
 		},
 	})
-	
+
 	if err != nil {
 		// Check if it's a conditional check failure
 		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
@@ -164,20 +164,20 @@ func (s *LockService) ReleaseLock(ctx context.Context, resourceID string, token 
 		}
 		return fmt.Errorf("failed to release lock: %w", err)
 	}
-	
+
 	return nil
 }
 
 // RenewLock extends the TTL of an existing lock
 func (s *LockService) RenewLock(ctx context.Context, resourceID string, token string, ttl time.Duration) error {
 	expiresAt := time.Now().Add(ttl).Unix()
-	
+
 	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.tableName),
 		Key: map[string]types.AttributeValue{
 			"resource_id": &types.AttributeValueMemberS{Value: resourceID},
 		},
-		UpdateExpression: aws.String("SET expires_at = :expires_at"),
+		UpdateExpression:    aws.String("SET expires_at = :expires_at"),
 		ConditionExpression: aws.String("#t = :token AND expires_at > :now"),
 		ExpressionAttributeNames: map[string]string{
 			"#t": "token",
@@ -188,7 +188,7 @@ func (s *LockService) RenewLock(ctx context.Context, resourceID string, token st
 			":now":        &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", time.Now().Unix())},
 		},
 	})
-	
+
 	if err != nil {
 		// Check if it's a conditional check failure
 		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
@@ -196,7 +196,7 @@ func (s *LockService) RenewLock(ctx context.Context, resourceID string, token st
 		}
 		return fmt.Errorf("failed to renew lock: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -208,27 +208,27 @@ func (s *LockService) IsLocked(ctx context.Context, resourceID string) (bool, st
 			"resource_id": &types.AttributeValueMemberS{Value: resourceID},
 		},
 	})
-	
+
 	if err != nil {
 		return false, "", fmt.Errorf("failed to get lock item: %w", err)
 	}
-	
+
 	if len(result.Item) == 0 {
 		// No lock exists
 		return false, "", nil
 	}
-	
+
 	var item LockItem
 	err = attributevalue.UnmarshalMap(result.Item, &item)
 	if err != nil {
 		return false, "", fmt.Errorf("failed to unmarshal lock item: %w", err)
 	}
-	
+
 	// Check if lock has expired
 	if item.ExpiresAt < time.Now().Unix() {
 		// Lock has expired
 		return false, "", nil
 	}
-	
+
 	return true, item.Owner, nil
 }

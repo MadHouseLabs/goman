@@ -56,20 +56,20 @@ func (s *ComputeService) getEC2Client(region string) *ec2.Client {
 		log.Printf("Warning: No region specified, using default client for region: %s", s.config.Region)
 		return s.client
 	}
-	
+
 	// Check cache first
 	if client, exists := s.regionClients[region]; exists {
 		log.Printf("Using cached EC2 client for region: %s", region)
 		return client
 	}
-	
+
 	// Create new client for the region
 	log.Printf("Creating new EC2 client for region: %s", region)
 	cfg := s.config.Copy()
 	cfg.Region = region
 	client := ec2.NewFromConfig(cfg)
 	s.regionClients[region] = client
-	
+
 	return client
 }
 
@@ -77,12 +77,12 @@ func (s *ComputeService) getEC2Client(region string) *ec2.Client {
 func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 	roleName := "goman-ssm-instance-role"
 	profileName := s.instanceProfile
-	
+
 	// Check if role exists
 	_, err := s.iamClient.GetRole(ctx, &iam.GetRoleInput{
 		RoleName: aws.String(roleName),
 	})
-	
+
 	if err != nil {
 		// Create trust policy for EC2
 		trustPolicy := map[string]interface{}{
@@ -97,12 +97,12 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 				},
 			},
 		}
-		
+
 		trustPolicyJSON, err := json.Marshal(trustPolicy)
 		if err != nil {
 			return fmt.Errorf("failed to marshal trust policy: %w", err)
 		}
-		
+
 		// Create the role
 		_, err = s.iamClient.CreateRole(ctx, &iam.CreateRoleInput{
 			RoleName:                 aws.String(roleName),
@@ -115,7 +115,7 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create IAM role: %w", err)
 		}
-		
+
 		// Attach SSM managed policy
 		_, err = s.iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
 			RoleName:  aws.String(roleName),
@@ -125,12 +125,12 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 			return fmt.Errorf("failed to attach SSM policy: %w", err)
 		}
 	}
-	
+
 	// Check if instance profile exists
 	_, err = s.iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
 		InstanceProfileName: aws.String(profileName),
 	})
-	
+
 	if err != nil {
 		// Create instance profile
 		_, err = s.iamClient.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
@@ -142,17 +142,17 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create instance profile: %w", err)
 		}
-		
+
 		// Add role to instance profile
 		_, err = s.iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
 			InstanceProfileName: aws.String(profileName),
-			RoleName:           aws.String(roleName),
+			RoleName:            aws.String(roleName),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to add role to instance profile: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -163,14 +163,14 @@ func (s *ComputeService) getLatestUbuntuAMI(ctx context.Context, region string) 
 	ssmClient := ssm.NewFromConfig(s.config.Copy(), func(o *ssm.Options) {
 		o.Region = region
 	})
-	
+
 	// Parameter path for Ubuntu 22.04 LTS (Jammy) arm64/amd64
 	parameterName := "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
-	
+
 	result, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
 		Name: aws.String(parameterName),
 	})
-	
+
 	if err != nil {
 		log.Printf("Failed to get Ubuntu AMI from SSM for region %s: %v", region, err)
 		// Fallback to Amazon Linux 2023 if Ubuntu parameter doesn't exist
@@ -182,7 +182,7 @@ func (s *ComputeService) getLatestUbuntuAMI(ctx context.Context, region string) 
 			return "", fmt.Errorf("failed to get AMI from SSM Parameter Store: %w", err)
 		}
 	}
-	
+
 	amiID := aws.ToString(result.Parameter.Value)
 	log.Printf("Using AMI %s for region %s", amiID, region)
 	return amiID, nil
@@ -192,10 +192,10 @@ func (s *ComputeService) getLatestUbuntuAMI(ctx context.Context, region string) 
 func (s *ComputeService) CreateInstance(ctx context.Context, config provider.InstanceConfig) (*provider.Instance, error) {
 	// Log the target region for debugging
 	log.Printf("Creating instance %s in region: %s", config.Name, config.Region)
-	
+
 	// Get region-specific EC2 client
 	ec2Client := s.getEC2Client(config.Region)
-	
+
 	// No SSH key needed - we'll use Systems Manager Session Manager instead
 	// Convert tags to EC2 format
 	var ec2Tags []types.Tag
@@ -205,24 +205,24 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 			Value: aws.String(v),
 		})
 	}
-	
+
 	// Add name tag
 	ec2Tags = append(ec2Tags, types.Tag{
 		Key:   aws.String("Name"),
 		Value: aws.String(config.Name),
 	})
-	
+
 	// HARD RULE: Always ensure network infrastructure in the target region
 	// This ensures we use the default VPC in the specified region
 	networkInfo, err := s.ensureNetworkInfrastructure(ctx, config.Name, config.Region)
 	if err != nil {
 		return nil, fmt.Errorf("failed to ensure network infrastructure in region %s: %w", config.Region, err)
 	}
-	
+
 	// Always use the network info from the target region
 	config.SubnetID = networkInfo.SubnetID
 	config.SecurityGroups = []string{networkInfo.SecurityGroupID}
-	
+
 	// Get region-specific AMI if not provided or if using default ap-south-1 AMI
 	if config.ImageID == "" || config.ImageID == "ami-0f5ee92e2d63afc18" || strings.HasPrefix(config.ImageID, "ami-ubuntu") {
 		amiID, err := s.getLatestUbuntuAMI(ctx, config.Region)
@@ -231,21 +231,21 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 		}
 		config.ImageID = amiID
 	}
-	
+
 	// Run instance with retry logic
 	var result *ec2.RunInstancesOutput
 	retryConfig := utils.DefaultRetryConfig()
 	err = utils.RetryWithBackoff(ctx, retryConfig, func(ctx context.Context) error {
 		var runErr error
 		runInstancesInput := &ec2.RunInstancesInput{
-			ImageId:          aws.String(config.ImageID),
-			InstanceType:     types.InstanceType(config.InstanceType),
-			MinCount:         aws.Int32(1),
-			MaxCount:         aws.Int32(1),
+			ImageId:      aws.String(config.ImageID),
+			InstanceType: types.InstanceType(config.InstanceType),
+			MinCount:     aws.Int32(1),
+			MaxCount:     aws.Int32(1),
 			// No KeyName - using Systems Manager instead
-			SecurityGroupIds: config.SecurityGroups,
-			SubnetId:         aws.String(config.SubnetID),
-			UserData:         aws.String(config.UserData),
+			SecurityGroupIds:      config.SecurityGroups,
+			SubnetId:              aws.String(config.SubnetID),
+			UserData:              aws.String(config.UserData),
 			DisableApiTermination: aws.Bool(true), // Enable deletion protection
 			TagSpecifications: []types.TagSpecification{
 				{
@@ -254,7 +254,7 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 				},
 			},
 		}
-		
+
 		// Add IAM instance profile for SSM access
 		if config.InstanceProfile != "" {
 			runInstancesInput.IamInstanceProfile = &types.IamInstanceProfileSpecification{
@@ -266,29 +266,29 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 				Name: aws.String(s.instanceProfile),
 			}
 		}
-		
+
 		result, runErr = ec2Client.RunInstances(ctx, runInstancesInput)
-		
+
 		if runErr != nil && utils.IsRetryableError(runErr) {
 			return runErr
 		}
 		return runErr
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to create instance after retries: %w", err)
 	}
-	
+
 	if len(result.Instances) == 0 {
 		return nil, fmt.Errorf("no instances created")
 	}
-	
+
 	inst := result.Instances[0]
-	
+
 	// Don't wait for instance to be running - return immediately
 	// The reconciler will check the status in subsequent reconciliation loops
 	// This allows parallel instance creation without blocking
-	
+
 	return s.convertToProviderInstance(&inst), nil
 }
 
@@ -296,7 +296,7 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) error {
 	// Try to find which region the instance is in by checking our cached clients
 	ec2Client := s.client // Default to main client
-	
+
 	// Try to find the instance in cached regions
 	for region, client := range s.regionClients {
 		result, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
@@ -308,7 +308,7 @@ func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) 
 			break
 		}
 	}
-	
+
 	// If not found in cached regions, try with default client
 	if ec2Client == s.client {
 		// Check if instance exists in default region
@@ -319,7 +319,7 @@ func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) 
 			log.Printf("Warning: Instance %s not found in any known region, attempting deletion with default client", instanceID)
 		}
 	}
-	
+
 	// First, disable deletion protection
 	_, err := ec2Client.ModifyInstanceAttribute(ctx, &ec2.ModifyInstanceAttributeInput{
 		InstanceId: aws.String(instanceID),
@@ -331,27 +331,27 @@ func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) 
 		log.Printf("Warning: Failed to disable deletion protection for %s: %v", instanceID, err)
 		// Continue anyway - the instance might not have protection enabled
 	}
-	
+
 	// Now terminate the instance
 	retryConfig := utils.DefaultRetryConfig()
 	err = utils.RetryWithBackoff(ctx, retryConfig, func(ctx context.Context) error {
 		_, err := ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
 			InstanceIds: []string{instanceID},
 		})
-		
+
 		if err != nil && utils.IsRetryableError(err) {
 			return err
 		}
 		return err
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to terminate instance after retries: %w", err)
 	}
-	
+
 	// Note: Cleanup of associated resources (security groups, key pairs) should be done
 	// by the controller after all instances are deleted, not here
-	
+
 	return nil
 }
 
@@ -364,21 +364,21 @@ func (s *ComputeService) GetInstance(ctx context.Context, instanceID string) (*p
 		result, descErr = s.client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 			InstanceIds: []string{instanceID},
 		})
-		
+
 		if descErr != nil && utils.IsRetryableError(descErr) {
 			return descErr
 		}
 		return descErr
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe instance after retries: %w", err)
 	}
-	
+
 	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
 		return nil, fmt.Errorf("instance not found")
 	}
-	
+
 	return s.convertToProviderInstance(&result.Reservations[0].Instances[0]), nil
 }
 
@@ -390,7 +390,7 @@ func (s *ComputeService) ListInstances(ctx context.Context, filters map[string]s
 		region = r
 		delete(filters, "region") // Remove from filters as it's not an EC2 filter
 	}
-	
+
 	// Get the appropriate EC2 client
 	var ec2Client *ec2.Client
 	if region != "" {
@@ -402,7 +402,7 @@ func (s *ComputeService) ListInstances(ctx context.Context, filters map[string]s
 		ec2Client = s.client
 		log.Printf("Warning: ListInstances using default region. May miss instances in other regions.")
 	}
-	
+
 	// Convert filters to EC2 format
 	var ec2Filters []types.Filter
 	for k, v := range filters {
@@ -420,22 +420,22 @@ func (s *ComputeService) ListInstances(ctx context.Context, filters map[string]s
 			Values: values,
 		})
 	}
-	
+
 	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		Filters: ec2Filters,
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to list instances: %w", err)
 	}
-	
+
 	var instances []*provider.Instance
 	for _, reservation := range result.Reservations {
 		for _, inst := range reservation.Instances {
 			instances = append(instances, s.convertToProviderInstance(&inst))
 		}
 	}
-	
+
 	return instances, nil
 }
 
@@ -444,11 +444,11 @@ func (s *ComputeService) StartInstance(ctx context.Context, instanceID string) e
 	_, err := s.client.StartInstances(ctx, &ec2.StartInstancesInput{
 		InstanceIds: []string{instanceID},
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to start instance: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -457,11 +457,11 @@ func (s *ComputeService) StopInstance(ctx context.Context, instanceID string) er
 	_, err := s.client.StopInstances(ctx, &ec2.StopInstancesInput{
 		InstanceIds: []string{instanceID},
 	})
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to stop instance: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -473,19 +473,19 @@ func (s *ComputeService) convertToProviderInstance(inst *types.Instance) *provid
 		InstanceType: string(inst.InstanceType),
 		Tags:         make(map[string]string),
 	}
-	
+
 	if inst.PrivateIpAddress != nil {
 		p.PrivateIP = *inst.PrivateIpAddress
 	}
-	
+
 	if inst.PublicIpAddress != nil {
 		p.PublicIP = *inst.PublicIpAddress
 	}
-	
+
 	if inst.LaunchTime != nil {
 		p.LaunchTime = *inst.LaunchTime
 	}
-	
+
 	// Extract tags
 	for _, tag := range inst.Tags {
 		if tag.Key != nil && tag.Value != nil {
@@ -495,7 +495,7 @@ func (s *ComputeService) convertToProviderInstance(inst *types.Instance) *provid
 			}
 		}
 	}
-	
+
 	return p
 }
 
@@ -512,12 +512,12 @@ type NetworkInfo struct {
 func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resourceName string, region string) (*NetworkInfo, error) {
 	// Use the default VPC and subnets for simplicity
 	// These resources are reused across all clusters
-	
+
 	log.Printf("Ensuring network infrastructure for %s in region: %s", resourceName, region)
-	
+
 	// Get region-specific EC2 client
 	ec2Client := s.getEC2Client(region)
-	
+
 	// Get default VPC
 	describeVpcsOutput, err := ec2Client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
 		Filters: []types.Filter{
@@ -530,13 +530,13 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe VPCs: %w", err)
 	}
-	
+
 	if len(describeVpcsOutput.Vpcs) == 0 {
 		return nil, fmt.Errorf("no default VPC found")
 	}
-	
+
 	vpcID := aws.ToString(describeVpcsOutput.Vpcs[0].VpcId)
-	
+
 	// Get default subnet in the first AZ
 	describeSubnetsOutput, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 		Filters: []types.Filter{
@@ -553,22 +553,22 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe subnets: %w", err)
 	}
-	
+
 	if len(describeSubnetsOutput.Subnets) == 0 {
 		return nil, fmt.Errorf("no default subnets found")
 	}
-	
+
 	subnetID := aws.ToString(describeSubnetsOutput.Subnets[0].SubnetId)
-	
+
 	// Extract cluster name from resource name (format: cluster-name-node-0)
 	clusterName := resourceName
 	if idx := len(resourceName) - 7; idx > 0 && resourceName[idx:idx+5] == "-node" {
 		clusterName = resourceName[:idx]
 	}
-	
+
 	// Create or get security group
 	sgName := fmt.Sprintf("goman-%s-sg", clusterName)
-	
+
 	// Check if security group exists
 	describeSGOutput, err := ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
 		Filters: []types.Filter{
@@ -582,7 +582,7 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 			},
 		},
 	})
-	
+
 	var securityGroupID string
 	if err != nil || len(describeSGOutput.SecurityGroups) == 0 {
 		// Create security group (will be reused if cluster is recreated)
@@ -614,9 +614,9 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 		if err != nil {
 			return nil, fmt.Errorf("failed to create security group: %w", err)
 		}
-		
+
 		securityGroupID = aws.ToString(createSGOutput.GroupId)
-		
+
 		// Add ingress rules for K3s
 		_, err = ec2Client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 			GroupId: aws.String(securityGroupID),
@@ -668,7 +668,7 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 		securityGroupID = aws.ToString(describeSGOutput.SecurityGroups[0].GroupId)
 		log.Printf("Reusing existing security group %s (ID: %s)", sgName, securityGroupID)
 	}
-	
+
 	return &NetworkInfo{
 		VPCID:           vpcID,
 		SubnetID:        subnetID,
@@ -682,7 +682,7 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 	if s.ssmClient == nil {
 		return nil, fmt.Errorf("SSM client not initialized - Systems Manager support not available")
 	}
-	
+
 	// Send command to instances
 	result, err := s.ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:  instanceIDs,
@@ -692,21 +692,21 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 		},
 		TimeoutSeconds: aws.Int32(300), // 5 minutes timeout
 	})
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to send command: %w", err)
 	}
-	
+
 	commandID := aws.ToString(result.Command.CommandId)
-	
+
 	// Wait for command to complete (with timeout)
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	
+
 	// Poll for command completion
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-waitCtx.Done():
@@ -716,11 +716,11 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 			invocations, err := s.ssmClient.ListCommandInvocations(waitCtx, &ssm.ListCommandInvocationsInput{
 				CommandId: aws.String(commandID),
 			})
-			
+
 			if err != nil {
 				return nil, fmt.Errorf("failed to get command status: %w", err)
 			}
-			
+
 			// Check if all invocations are complete
 			allComplete := true
 			cmdResult := &provider.CommandResult{
@@ -728,44 +728,43 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 				Status:    "Success",
 				Instances: make(map[string]*provider.InstanceCommandResult),
 			}
-			
+
 			for _, inv := range invocations.CommandInvocations {
 				instanceID := aws.ToString(inv.InstanceId)
 				status := string(inv.Status)
-				
+
 				if status == "InProgress" || status == "Pending" {
 					allComplete = false
 					continue
 				}
-				
+
 				// Get command output
 				output, err := s.ssmClient.GetCommandInvocation(waitCtx, &ssm.GetCommandInvocationInput{
 					CommandId:  aws.String(commandID),
 					InstanceId: aws.String(instanceID),
 				})
-				
+
 				instanceResult := &provider.InstanceCommandResult{
 					InstanceID: instanceID,
 					Status:     status,
 				}
-				
+
 				if err == nil {
 					instanceResult.Output = aws.ToString(output.StandardOutputContent)
 					instanceResult.Error = aws.ToString(output.StandardErrorContent)
 					instanceResult.ExitCode = int(output.ResponseCode)
 				}
-				
+
 				cmdResult.Instances[instanceID] = instanceResult
-				
+
 				if status != "Success" {
 					cmdResult.Status = "Failed"
 				}
 			}
-			
+
 			if allComplete {
 				return cmdResult, nil
 			}
 		}
 	}
 }
-
