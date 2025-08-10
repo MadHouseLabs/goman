@@ -242,15 +242,13 @@ func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionN
 	lambdaClient := provider.GetLambdaClient()
 	
 	// Define the rule name
-	ruleName := "goman-ec2-termination-rule"
+	ruleName := "goman-ec2-state-change-rule"
 	
-	// Create event pattern for EC2 instance state changes
+	// Create event pattern for ALL EC2 instance state changes
 	eventPattern := map[string]interface{}{
 		"source":      []string{"aws.ec2"},
 		"detail-type": []string{"EC2 Instance State-change Notification"},
-		"detail": map[string]interface{}{
-			"state": []string{"terminated", "terminating", "stopped"},
-		},
+		// No state filter - we want ALL state changes (running, stopped, stopping, terminated, terminating, pending, shutting-down)
 	}
 	
 	eventPatternJSON, err := json.Marshal(eventPattern)
@@ -261,7 +259,7 @@ func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionN
 	// Create or update the rule
 	_, err = eventClient.PutRule(ctx, &eventbridge.PutRuleInput{
 		Name:         awssdk.String(ruleName),
-		Description:  awssdk.String("Trigger Lambda on EC2 instance termination for Goman clusters"),
+		Description:  awssdk.String("Trigger Lambda on any EC2 instance state change for Goman cluster reconciliation"),
 		EventPattern: awssdk.String(string(eventPatternJSON)),
 		State:        eventbridgetypes.RuleStateEnabled,
 	})

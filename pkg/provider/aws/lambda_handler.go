@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/madhouselabs/goman/pkg/controller"
 	"github.com/madhouselabs/goman/pkg/models"
+	"github.com/madhouselabs/goman/pkg/storage"
 )
 
 // LambdaEvent represents the incoming Lambda event
@@ -22,6 +24,8 @@ type LambdaEvent struct {
 // LambdaHandler wraps the reconciler for AWS Lambda
 type LambdaHandler struct {
 	reconciler *controller.Reconciler
+	storage    *storage.Storage
+	provider   *AWSProvider
 }
 
 // NewLambdaHandler creates a new Lambda handler
@@ -69,8 +73,16 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 		return nil, fmt.Errorf("failed to create reconciler: %w", err)
 	}
 	
+	// Create storage for accessing cluster states
+	stor, err := storage.NewStorage()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create storage: %w", err)
+	}
+	
 	return &LambdaHandler{
 		reconciler: reconciler,
+		storage:    stor,
+		provider:   prov,
 	}, nil
 }
 
@@ -108,20 +120,25 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 		// EC2 instance state change event
 		instanceID := ec2Event.Detail.InstanceID
 		state := ec2Event.Detail.State
+		region := ec2Event.Region
 		
-		log.Printf("Processing EC2 event: instance %s is now %s", instanceID, state)
+		log.Printf("Processing EC2 state change event: instance %s in region %s changed to %s", instanceID, region, state)
 		
-		// Find which cluster this instance belongs to by checking tags
-		// For now, trigger reconciliation for all clusters (Lambda will figure out which one needs updating)
-		// In production, you'd want to be more targeted
-		log.Printf("EC2 instance %s changed state to %s, triggering cluster reconciliation", instanceID, state)
+		// Get the cluster owner from instance tags
+		clusterName, err := h.getClusterFromInstanceTags(ctx, instanceID, region)
+		if err != nil {
+			log.Printf("Failed to get cluster from instance tags: %v", err)
+			return nil, err
+		}
 		
-		// We don't know which specific cluster, so we'll need to check all
-		// This is a limitation that could be improved by storing instance-to-cluster mapping
-		return &models.ReconcileResult{
-			Requeue:      true,
-			RequeueAfter: 5 * time.Second,
-		}, nil
+		if clusterName == "" {
+			log.Printf("Instance %s has no Cluster tag, ignoring state change to %s", instanceID, state)
+			return &models.ReconcileResult{}, nil
+		}
+		
+		log.Printf("Instance %s belongs to cluster %s (state: %s), triggering reconciliation", 
+			instanceID, clusterName, state)
+		return h.reconciler.ReconcileCluster(ctx, clusterName)
 	}
 	
 	return nil, fmt.Errorf("invalid event format or missing cluster name")
@@ -135,6 +152,7 @@ type S3Event struct {
 // EC2StateChangeEvent represents an EventBridge EC2 state change event
 type EC2StateChangeEvent struct {
 	DetailType string `json:"detail-type"`
+	Region     string `json:"region"`
 	Detail     struct {
 		InstanceID string `json:"instance-id"`
 		State      string `json:"state"`
@@ -166,6 +184,38 @@ func extractClusterName(key string) string {
 	}
 	
 	return ""
+}
+
+// getClusterFromInstanceTags queries EC2 to get the Cluster tag value from an instance
+func (h *LambdaHandler) getClusterFromInstanceTags(ctx context.Context, instanceID, region string) (string, error) {
+	// Get EC2 client for the specific region
+	computeService := h.provider.GetComputeService().(*ComputeService)
+	ec2Client := computeService.getEC2Client(region)
+	
+	// Describe the instance to get its tags
+	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe instance %s in region %s: %w", instanceID, region, err)
+	}
+	
+	// Check if we found the instance
+	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
+		return "", fmt.Errorf("instance %s not found in region %s", instanceID, region)
+	}
+	
+	instance := result.Reservations[0].Instances[0]
+	
+	// Look for the Cluster tag
+	for _, tag := range instance.Tags {
+		if tag.Key != nil && *tag.Key == "Cluster" && tag.Value != nil {
+			return *tag.Value, nil
+		}
+	}
+	
+	// No Cluster tag found
+	return "", nil
 }
 
 // StartLambdaHandler starts the Lambda handler

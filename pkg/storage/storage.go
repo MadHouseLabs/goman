@@ -26,10 +26,8 @@ type K3sClusterState struct {
 // NewStorage creates a new storage instance with S3 backend
 func NewStorage() (*Storage, error) {
 	// Always use S3 storage with standard configuration
+	// In Lambda environment, don't use profile - use IAM role
 	profile := os.Getenv("AWS_PROFILE")
-	if profile == "" {
-		profile = "default"
-	}
 	
 	backend, err := NewS3Backend(profile)
 	if err != nil {

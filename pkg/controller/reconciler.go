@@ -424,10 +424,19 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.Clu
 	computeService := r.provider.GetComputeService()
 	
 	// First, check if any instances still exist in AWS
-	actualInstances, err := computeService.ListInstances(ctx, map[string]string{
+	// Include the region in the filters if available
+	filters := map[string]string{
 		"tag:Cluster": resource.Name,
 		"instance-state-name": "pending,running,stopping,stopped", // Don't include "terminated"
-	})
+	}
+	
+	// Add region filter if the cluster has a region specified
+	if resource.Spec.Region != "" {
+		filters["region"] = resource.Spec.Region
+		log.Printf("Checking for instances in region: %s", resource.Spec.Region)
+	}
+	
+	actualInstances, err := computeService.ListInstances(ctx, filters)
 	if err != nil {
 		log.Printf("Warning: failed to list instances for deletion check: %v", err)
 		// Continue with deletion anyway
@@ -555,12 +564,16 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 		Generation: 1,
 	}
 	
-	// Extract master nodes to get node count and instance type
+	// Extract master nodes to get node count, instance type, and region
 	if masterNodes, ok := cluster["master_nodes"].([]interface{}); ok && len(masterNodes) > 0 {
 		resource.Spec.NodeCount = len(masterNodes)
 		if node, ok := masterNodes[0].(map[string]interface{}); ok {
 			if instanceType := getStringFromMap(node, "instance_type"); instanceType != "" {
 				resource.Spec.InstanceType = instanceType
+			}
+			// Extract region from node
+			if region := getStringFromMap(node, "region"); region != "" {
+				resource.Spec.Region = region
 			}
 		}
 	} else {
@@ -574,6 +587,11 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 		// Check for instance_type in cluster config
 		if instanceType := getStringFromMap(cluster, "instance_type"); instanceType != "" {
 			resource.Spec.InstanceType = instanceType
+		}
+		
+		// Check for region in cluster config
+		if region := getStringFromMap(cluster, "region"); region != "" {
+			resource.Spec.Region = region
 		}
 	}
 	

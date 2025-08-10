@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -274,6 +275,7 @@ func (s *FunctionService) GetFunctionURL(ctx context.Context, name string) (stri
 // ensureIAMRole creates or gets the IAM role for Lambda
 func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 	roleName := fmt.Sprintf("%s-%s", LambdaRolePrefix, s.accountID)
+	var roleArn string
 	
 	// Check if role exists
 	getRoleOutput, err := s.iamClient.GetRole(ctx, &iam.GetRoleInput{
@@ -281,48 +283,57 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 	})
 	
 	if err == nil {
-		// Role exists, return its ARN
-		return *getRoleOutput.Role.Arn, nil
+		// Role exists, but we still need to ensure the policy is up to date
+		roleArn = *getRoleOutput.Role.Arn
+		// Continue to check/update the policy below
+	} else {
+		// Role doesn't exist, we'll create it below
+		roleArn = ""
 	}
 	
-	// Create trust policy for Lambda
-	trustPolicy := map[string]interface{}{
-		"Version": "2012-10-17",
-		"Statement": []map[string]interface{}{
-			{
-				"Effect": "Allow",
-				"Principal": map[string]string{
-					"Service": "lambda.amazonaws.com",
+	// If role doesn't exist, create it
+	if roleArn == "" {
+		// Create trust policy for Lambda
+		trustPolicy := map[string]interface{}{
+			"Version": "2012-10-17",
+			"Statement": []map[string]interface{}{
+				{
+					"Effect": "Allow",
+					"Principal": map[string]string{
+						"Service": "lambda.amazonaws.com",
+					},
+					"Action": "sts:AssumeRole",
 				},
-				"Action": "sts:AssumeRole",
 			},
-		},
-	}
-	
-	trustPolicyJSON, err := json.Marshal(trustPolicy)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal trust policy: %w", err)
-	}
-	
-	// Create the role
-	createRoleOutput, err := s.iamClient.CreateRole(ctx, &iam.CreateRoleInput{
-		RoleName:                 aws.String(roleName),
-		AssumeRolePolicyDocument: aws.String(string(trustPolicyJSON)),
-		Description:              aws.String("Role for Goman Lambda functions"),
-		Tags: []iamtypes.Tag{
-			{
-				Key:   aws.String("Application"),
-				Value: aws.String("goman"),
+		}
+		
+		trustPolicyJSON, err := json.Marshal(trustPolicy)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal trust policy: %w", err)
+		}
+		
+		// Create the role
+		createRoleOutput, err := s.iamClient.CreateRole(ctx, &iam.CreateRoleInput{
+			RoleName:                 aws.String(roleName),
+			AssumeRolePolicyDocument: aws.String(string(trustPolicyJSON)),
+			Description:              aws.String("Role for Goman Lambda functions"),
+			Tags: []iamtypes.Tag{
+				{
+					Key:   aws.String("Application"),
+					Value: aws.String("goman"),
+				},
+				{
+					Key:   aws.String("ManagedBy"),
+					Value: aws.String("goman"),
+				},
 			},
-			{
-				Key:   aws.String("ManagedBy"),
-				Value: aws.String("goman"),
-			},
-		},
-	})
-	
-	if err != nil {
-		return "", fmt.Errorf("failed to create IAM role: %w", err)
+		})
+		
+		if err != nil {
+			return "", fmt.Errorf("failed to create IAM role: %w", err)
+		}
+		
+		roleArn = *createRoleOutput.Role.Arn
 	}
 	
 	// Attach basic Lambda execution policy
@@ -374,6 +385,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 					"ec2:DescribeVpcs",
 					"ec2:DescribeSubnets",
 					"ec2:CreateTags",
+					"ec2:ModifyInstanceAttribute",
 				},
 				"Resource": "*",
 			},
@@ -390,13 +402,14 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 					fmt.Sprintf("arn:aws:iam::%s:instance-profile/goman-ssm-instance-profile", s.accountID),
 				},
 			},
-			// SSM permissions for remote command execution
+			// SSM permissions for remote command execution and parameter access
 			{
 				"Effect": "Allow",
 				"Action": []string{
 					"ssm:SendCommand",
 					"ssm:GetCommandInvocation",
 					"ssm:ListCommandInvocations",
+					"ssm:GetParameter",
 				},
 				"Resource": "*",
 			},
@@ -408,7 +421,8 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to marshal policy document: %w", err)
 	}
 	
-	// Create the policy
+	// Try to create the policy first
+	policyArn := fmt.Sprintf("arn:aws:iam::%s:policy/%s", s.accountID, policyName)
 	createPolicyOutput, err := s.iamClient.CreatePolicy(ctx, &iam.CreatePolicyInput{
 		PolicyName:     aws.String(policyName),
 		PolicyDocument: aws.String(string(policyJSON)),
@@ -416,14 +430,45 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 	})
 	
 	if err != nil {
-		// Policy might already exist, try to get it
-		getPolicyOutput, getErr := s.iamClient.GetPolicy(ctx, &iam.GetPolicyInput{
-			PolicyArn: aws.String(fmt.Sprintf("arn:aws:iam::%s:policy/%s", s.accountID, policyName)),
-		})
-		if getErr != nil {
-			return "", fmt.Errorf("failed to create or get policy: %w", err)
+		// Policy already exists, update it by creating a new version
+		if strings.Contains(err.Error(), "EntityAlreadyExists") {
+			// First, list and delete old policy versions to make room
+			listVersionsOutput, listErr := s.iamClient.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{
+				PolicyArn: aws.String(policyArn),
+			})
+			
+			if listErr == nil && listVersionsOutput.Versions != nil {
+				// AWS allows max 5 versions. Delete old non-default versions
+				for _, version := range listVersionsOutput.Versions {
+					if !version.IsDefaultVersion && len(listVersionsOutput.Versions) >= 5 {
+						_, delErr := s.iamClient.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{
+							PolicyArn: aws.String(policyArn),
+							VersionId: version.VersionId,
+						})
+						if delErr != nil {
+							log.Printf("Warning: Failed to delete old policy version %s: %v", *version.VersionId, delErr)
+						}
+					}
+				}
+			}
+			
+			// Create new policy version
+			createPolicyVersionOutput, versionErr := s.iamClient.CreatePolicyVersion(ctx, &iam.CreatePolicyVersionInput{
+				PolicyArn:      aws.String(policyArn),
+				PolicyDocument: aws.String(string(policyJSON)),
+				SetAsDefault:   true,
+			})
+			
+			if versionErr != nil {
+				return "", fmt.Errorf("failed to create new policy version: %w", versionErr)
+			}
+			
+			log.Printf("Updated IAM policy %s to version %s", policyName, *createPolicyVersionOutput.PolicyVersion.VersionId)
+			policies = append(policies, policyArn)
+		} else {
+			// Some other error occurred
+			return "", fmt.Errorf("failed to create policy: %w", err)
 		}
-		policies = append(policies, *getPolicyOutput.Policy.Arn)
 	} else {
 		policies = append(policies, *createPolicyOutput.Policy.Arn)
 	}
@@ -441,7 +486,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 	// Wait a bit for the role to be available
 	time.Sleep(10 * time.Second)
 	
-	return *createRoleOutput.Role.Arn, nil
+	return roleArn, nil
 }
 
 // setupS3Trigger sets up S3 event notification to trigger Lambda

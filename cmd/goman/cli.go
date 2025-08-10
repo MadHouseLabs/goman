@@ -317,7 +317,7 @@ func (cli *CLI) cleanupInfrastructure(ctx context.Context) error {
 	// 1. Delete EventBridge rule and Lambda function
 	fmt.Println("  • Deleting EventBridge rules...")
 	eventClient := eventbridge.NewFromConfig(cfg)
-	ruleName := "goman-ec2-termination-rule"
+	ruleName := "goman-ec2-state-change-rule"
 	
 	// Remove targets first
 	eventClient.RemoveTargets(ctx, &eventbridge.RemoveTargetsInput{
@@ -405,9 +405,23 @@ func (cli *CLI) cleanupInfrastructure(ctx context.Context) error {
 		}
 	}
 	
-	// Delete custom policy
+	// Delete custom policy (first delete all non-default versions)
+	policyArn := fmt.Sprintf("arn:aws:iam::%s:policy/%s", accountID, lambdaPolicyName)
+	listVersionsOutput, err := iamClient.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{
+		PolicyArn: awssdk.String(policyArn),
+	})
+	if err == nil && listVersionsOutput.Versions != nil {
+		for _, version := range listVersionsOutput.Versions {
+			if !version.IsDefaultVersion {
+				iamClient.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{
+					PolicyArn: awssdk.String(policyArn),
+					VersionId: version.VersionId,
+				})
+			}
+		}
+	}
 	iamClient.DeletePolicy(ctx, &iam.DeletePolicyInput{
-		PolicyArn: awssdk.String(fmt.Sprintf("arn:aws:iam::%s:policy/%s", accountID, lambdaPolicyName)),
+		PolicyArn: awssdk.String(policyArn),
 	})
 	
 	// Delete Lambda role

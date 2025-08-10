@@ -21,6 +21,11 @@ func GetAWSRegion() string {
 
 // GetAWSProfile returns the AWS profile to use
 func GetAWSProfile() string {
+	// In Lambda environment, we don't use profiles
+	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" {
+		return ""
+	}
+	
 	profile := os.Getenv("AWS_PROFILE")
 	if profile == "" {
 		profile = "default"

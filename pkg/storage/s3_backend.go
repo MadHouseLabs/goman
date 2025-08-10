@@ -36,10 +36,22 @@ func NewS3Backend(profile string) (*S3Backend, error) {
 	}
 	
 	// Load AWS config with profile (profile is only used for authentication)
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(region),
-		config.WithSharedConfigProfile(profile),
-	)
+	var cfg aws.Config
+	var err error
+	
+	if profile != "" {
+		// Use profile if specified (local development)
+		cfg, err = config.LoadDefaultConfig(context.TODO(),
+			config.WithRegion(region),
+			config.WithSharedConfigProfile(profile),
+		)
+	} else {
+		// Use default credentials chain (Lambda IAM role, EC2 instance role, etc.)
+		cfg, err = config.LoadDefaultConfig(context.TODO(),
+			config.WithRegion(region),
+		)
+	}
+	
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
