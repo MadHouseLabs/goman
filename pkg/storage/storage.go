@@ -1,0 +1,97 @@
+package storage
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/madhouselabs/goman/pkg/models"
+)
+
+// Storage wraps a StorageBackend for backward compatibility
+type Storage struct {
+	backend StorageBackend
+}
+
+// K3sClusterState represents the complete state of a k3s cluster with AWS resources
+type K3sClusterState struct {
+	Cluster        models.K3sCluster      `json:"cluster"`
+	InstanceIDs    map[string]string      `json:"instance_ids"`
+	VolumeIDs      map[string][]string    `json:"volume_ids"`
+	SecurityGroups []string               `json:"security_groups"`
+	VPCID          string                 `json:"vpc_id"`
+	SubnetIDs      []string               `json:"subnet_ids"`
+	Metadata       map[string]interface{} `json:"metadata"`
+}
+
+// NewStorage creates a new storage instance with S3 backend
+func NewStorage() (*Storage, error) {
+	// Always use S3 storage with standard configuration
+	profile := os.Getenv("AWS_PROFILE")
+	if profile == "" {
+		profile = "default"
+	}
+	
+	backend, err := NewS3Backend(profile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 storage backend: %w", err)
+	}
+	
+	if err := backend.Initialize(); err != nil {
+		return nil, fmt.Errorf("failed to initialize S3 storage: %w", err)
+	}
+	
+	return &Storage{
+		backend: backend,
+	}, nil
+}
+
+// NewStorageWithBackend creates a new storage instance with specified backend
+func NewStorageWithBackend(backend StorageBackend) (*Storage, error) {
+	if err := backend.Initialize(); err != nil {
+		return nil, err
+	}
+	
+	return &Storage{
+		backend: backend,
+	}, nil
+}
+
+// SaveClusters saves k3s clusters using the backend
+func (s *Storage) SaveClusters(clusters []models.K3sCluster) error {
+	return s.backend.SaveClusters(clusters)
+}
+
+// LoadClusters loads k3s clusters using the backend
+func (s *Storage) LoadClusters() ([]models.K3sCluster, error) {
+	return s.backend.LoadClusters()
+}
+
+// SaveClusterState saves complete cluster state using the backend
+func (s *Storage) SaveClusterState(state *K3sClusterState) error {
+	return s.backend.SaveClusterState(state)
+}
+
+// LoadClusterState loads complete cluster state using the backend
+func (s *Storage) LoadClusterState(clusterName string) (*K3sClusterState, error) {
+	return s.backend.LoadClusterState(clusterName)
+}
+
+// LoadAllClusterStates loads all cluster states using the backend
+func (s *Storage) LoadAllClusterStates() ([]*K3sClusterState, error) {
+	return s.backend.LoadAllClusterStates()
+}
+
+// DeleteClusterState deletes cluster state using the backend
+func (s *Storage) DeleteClusterState(clusterName string) error {
+	return s.backend.DeleteClusterState(clusterName)
+}
+
+// SaveConfig saves application configuration using the backend
+func (s *Storage) SaveConfig(config map[string]interface{}) error {
+	return s.backend.SaveConfig(config)
+}
+
+// LoadConfig loads application configuration using the backend
+func (s *Storage) LoadConfig() (map[string]interface{}, error) {
+	return s.backend.LoadConfig()
+}
