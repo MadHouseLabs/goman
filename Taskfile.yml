@@ -1,0 +1,227 @@
+version: '3'
+
+vars:
+  BINARY_NAME: goman
+  LAMBDA_BINARY: lambda-controller
+  BUILD_DIR: build
+  INSTALL_PATH: /usr/local/bin
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build all binaries
+    deps:
+      - build:ui
+      - build:lambda
+    cmds:
+      - echo "✅ All binaries built successfully"
+
+  build:ui:
+    desc: Build the main UI binary
+    cmds:
+      - echo "🔨 Building UI..."
+      - go build -v -o {{.BINARY_NAME}} ./cmd/goman
+    sources:
+      - cmd/goman/**/*.go
+      - pkg/**/*.go
+    generates:
+      - "{{.BINARY_NAME}}"
+
+  build:lambda:
+    desc: Build Lambda controllers for all providers
+    deps:
+      - build:lambda:aws
+    cmds:
+      - echo "✅ All Lambda packages built"
+
+  build:lambda:aws:
+    desc: Build the AWS Lambda controller binary and package
+    cmds:
+      - echo "🔨 Building AWS Lambda controller..."
+      - mkdir -p {{.BUILD_DIR}}
+      - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags aws -o {{.BUILD_DIR}}/bootstrap ./lambda/controller
+      - cd {{.BUILD_DIR}} && zip -q lambda-aws-controller.zip bootstrap
+      - echo "✅ AWS Lambda package created at {{.BUILD_DIR}}/lambda-aws-controller.zip"
+    sources:
+      - lambda/controller/**/*.go
+      - pkg/**/*.go
+    generates:
+      - "{{.BUILD_DIR}}/lambda-aws-controller.zip"
+  
+  deploy:lambda:
+    desc: Deploy Lambda function to AWS
+    deps: [build:lambda:aws]
+    cmds:
+      - echo "🚀 Deploying Lambda function..."
+      - |
+        # Check if function exists
+        if aws lambda get-function --function-name goman-cluster-controller --region ap-south-1 > /dev/null 2>&1; then
+          echo "📦 Updating existing Lambda function..."
+          aws lambda update-function-code \
+            --function-name goman-cluster-controller \
+            --zip-file fileb://{{.BUILD_DIR}}/lambda-aws-controller.zip \
+            --region ap-south-1
+        else
+          echo "❌ Lambda function 'goman-cluster-controller' does not exist."
+          echo "💡 Run the goman UI first to initialize infrastructure."
+          exit 1
+        fi
+      - echo "✅ Lambda deployment complete"
+
+
+  install:
+    desc: Install goman to system path
+    deps: [build:ui]
+    cmds:
+      - echo "📦 Installing {{.BINARY_NAME}} to {{.INSTALL_PATH}}..."
+      - sudo cp {{.BINARY_NAME}} {{.INSTALL_PATH}}/
+      - sudo chmod +x {{.INSTALL_PATH}}/{{.BINARY_NAME}}
+      - echo "✅ Installation complete"
+
+  uninstall:
+    desc: Remove goman from system path
+    cmds:
+      - echo "🗑️  Removing {{.BINARY_NAME}} from {{.INSTALL_PATH}}..."
+      - sudo rm -f {{.INSTALL_PATH}}/{{.BINARY_NAME}}
+      - echo "✅ Uninstallation complete"
+
+  run:
+    desc: Run the UI
+    deps: [build:ui]
+    cmds:
+      - ./{{.BINARY_NAME}}
+
+  lambda:logs:
+    desc: View Lambda function logs in CloudWatch
+    cmds:
+      - echo "📋 Viewing Lambda logs..."
+      - aws logs tail /aws/lambda/goman-cluster-controller --follow --region ap-south-1
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - echo "🧹 Cleaning build artifacts..."
+      - rm -f {{.BINARY_NAME}}
+      - rm -rf {{.BUILD_DIR}}
+      - echo "✅ Clean complete"
+
+  clean:all:
+    desc: Clean all build artifacts
+    cmds:
+      - task: clean
+      - echo "✅ All artifacts cleaned"
+
+  test:
+    desc: Run tests
+    cmds:
+      - echo "🧪 Running tests..."
+      - go test -v ./...
+
+  test:coverage:
+    desc: Run tests with coverage
+    cmds:
+      - echo "🧪 Running tests with coverage..."
+      - go test -v -cover ./...
+
+  fmt:
+    desc: Format code
+    cmds:
+      - echo "🎨 Formatting code..."
+      - go fmt ./...
+      - echo "✅ Code formatted"
+
+  lint:
+    desc: Run linter
+    cmds:
+      - echo "🔍 Running linter..."
+      - |
+        if command -v golangci-lint &> /dev/null; then
+          golangci-lint run
+        else
+          echo "❌ golangci-lint not installed. Install with:"
+          echo "  brew install golangci-lint"
+          exit 1
+        fi
+
+  deps:
+    desc: Download and tidy dependencies
+    cmds:
+      - echo "📦 Managing dependencies..."
+      - go mod download
+      - go mod tidy
+      - echo "✅ Dependencies updated"
+
+  deps:update:
+    desc: Update all dependencies
+    cmds:
+      - echo "⬆️  Updating dependencies..."
+      - go get -u ./...
+      - go mod tidy
+      - echo "✅ Dependencies updated"
+
+  dev:
+    desc: Run in development mode with auto-reload
+    cmds:
+      - |
+        if command -v air &> /dev/null; then
+          air
+        else
+          echo "❌ Air not installed. Install with:"
+          echo "  go install github.com/cosmtrek/air@latest"
+          exit 1
+        fi
+
+  dev:setup:
+    desc: Setup development environment
+    cmds:
+      - echo "🛠️  Setting up development environment..."
+      - go install github.com/cosmtrek/air@latest
+      - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+      - task: deps
+      - echo "✅ Development environment ready"
+
+  docker:build:
+    desc: Build Docker image
+    cmds:
+      - docker build -t goman:latest .
+
+  docker:run:
+    desc: Run in Docker
+    deps: [docker:build]
+    cmds:
+      - docker run -it --rm -e AWS_PROFILE -e AWS_REGION -v ~/.aws:/root/.aws:ro goman:latest
+
+  release:
+    desc: Build release binaries for all platforms
+    cmds:
+      - echo "📦 Building release binaries..."
+      - mkdir -p dist
+      # macOS
+      - GOOS=darwin GOARCH=amd64 go build -o dist/{{.BINARY_NAME}}-darwin-amd64 ./cmd/goman
+      - GOOS=darwin GOARCH=arm64 go build -o dist/{{.BINARY_NAME}}-darwin-arm64 ./cmd/goman
+      # Linux
+      - GOOS=linux GOARCH=amd64 go build -o dist/{{.BINARY_NAME}}-linux-amd64 ./cmd/goman
+      - GOOS=linux GOARCH=arm64 go build -o dist/{{.BINARY_NAME}}-linux-arm64 ./cmd/goman
+      # Windows
+      - GOOS=windows GOARCH=amd64 go build -o dist/{{.BINARY_NAME}}-windows-amd64.exe ./cmd/goman
+      - echo "✅ Release binaries built in dist/"
+
+  check:
+    desc: Run all checks (fmt, lint, test)
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: test
+
+  watch:
+    desc: Watch for changes and rebuild
+    cmds:
+      - |
+        echo "👀 Watching for changes..."
+        while true; do
+          fswatch -o pkg cmd | xargs -n1 -I{} task build:ui
+        done
