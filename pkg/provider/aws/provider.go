@@ -188,6 +188,11 @@ func (p *AWSProvider) GetLambdaClient() *lambda.Client {
 	return p.lambdaClient
 }
 
+// GetConfig returns the AWS config
+func (p *AWSProvider) GetConfig() aws.Config {
+	return p.cfg
+}
+
 // CleanupClusterResources implements the ClusterCleaner interface
 func (p *AWSProvider) CleanupClusterResources(ctx context.Context, clusterName string) error {
 	log.Printf("Cleaning up AWS resources for cluster %s", clusterName)

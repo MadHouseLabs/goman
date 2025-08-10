@@ -304,6 +304,7 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 				
 				instanceConfig := provider.InstanceConfig{
 					Name:         nodeName,
+					Region:       resource.Spec.Region, // Honor the region from cluster spec
 					InstanceType: resource.Spec.InstanceType,
 					ImageID:      providerConfig.GetAWSAMI(),
 					// No KeyName needed - using Systems Manager instead

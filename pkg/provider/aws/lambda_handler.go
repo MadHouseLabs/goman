@@ -102,12 +102,43 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 		}
 	}
 	
+	// Try to parse as EventBridge EC2 event
+	var ec2Event EC2StateChangeEvent
+	if err := json.Unmarshal(event, &ec2Event); err == nil && ec2Event.DetailType == "EC2 Instance State-change Notification" {
+		// EC2 instance state change event
+		instanceID := ec2Event.Detail.InstanceID
+		state := ec2Event.Detail.State
+		
+		log.Printf("Processing EC2 event: instance %s is now %s", instanceID, state)
+		
+		// Find which cluster this instance belongs to by checking tags
+		// For now, trigger reconciliation for all clusters (Lambda will figure out which one needs updating)
+		// In production, you'd want to be more targeted
+		log.Printf("EC2 instance %s changed state to %s, triggering cluster reconciliation", instanceID, state)
+		
+		// We don't know which specific cluster, so we'll need to check all
+		// This is a limitation that could be improved by storing instance-to-cluster mapping
+		return &models.ReconcileResult{
+			Requeue:      true,
+			RequeueAfter: 5 * time.Second,
+		}, nil
+	}
+	
 	return nil, fmt.Errorf("invalid event format or missing cluster name")
 }
 
 // S3Event represents an S3 event notification
 type S3Event struct {
 	Records []S3EventRecord `json:"Records"`
+}
+
+// EC2StateChangeEvent represents an EventBridge EC2 state change event
+type EC2StateChangeEvent struct {
+	DetailType string `json:"detail-type"`
+	Detail     struct {
+		InstanceID string `json:"instance-id"`
+		State      string `json:"state"`
+	} `json:"detail"`
 }
 
 // S3EventRecord represents a single S3 event record

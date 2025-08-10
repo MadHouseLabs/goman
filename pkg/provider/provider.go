@@ -97,6 +97,7 @@ type InstanceCommandResult struct {
 // InstanceConfig defines configuration for creating instances
 type InstanceConfig struct {
 	Name            string
+	Region          string // Region where instance should be created
 	InstanceType    string
 	ImageID         string
 	SubnetID        string

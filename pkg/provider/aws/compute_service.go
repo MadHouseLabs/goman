@@ -25,6 +25,7 @@ type ComputeService struct {
 	iamClient       *iam.Client
 	config          aws.Config
 	instanceProfile string
+	regionClients   map[string]*ec2.Client // Cache of region-specific EC2 clients
 }
 
 // NewComputeService creates a new EC2-based compute service
@@ -35,6 +36,7 @@ func NewComputeService(client *ec2.Client, iamClient *iam.Client, cfg aws.Config
 		iamClient:       iamClient,
 		config:          cfg,
 		instanceProfile: "goman-ssm-instance-profile",
+		regionClients:   make(map[string]*ec2.Client),
 	}
 }
 
@@ -45,6 +47,27 @@ func (s *ComputeService) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to ensure SSM instance profile: %w", err)
 	}
 	return nil
+}
+
+// getEC2Client returns an EC2 client for the specified region
+func (s *ComputeService) getEC2Client(region string) *ec2.Client {
+	// If no region specified, use default client
+	if region == "" {
+		return s.client
+	}
+	
+	// Check cache first
+	if client, exists := s.regionClients[region]; exists {
+		return client
+	}
+	
+	// Create new client for the region
+	cfg := s.config.Copy()
+	cfg.Region = region
+	client := ec2.NewFromConfig(cfg)
+	s.regionClients[region] = client
+	
+	return client
 }
 
 // ensureSSMInstanceProfile creates the IAM instance profile for SSM if it doesn't exist
@@ -132,6 +155,9 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 
 // CreateInstance creates a new EC2 instance with retry logic
 func (s *ComputeService) CreateInstance(ctx context.Context, config provider.InstanceConfig) (*provider.Instance, error) {
+	// Get region-specific EC2 client
+	ec2Client := s.getEC2Client(config.Region)
+	
 	// No SSH key needed - we'll use Systems Manager Session Manager instead
 	// Convert tags to EC2 format
 	var ec2Tags []types.Tag
@@ -162,6 +188,7 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 			SecurityGroupIds: config.SecurityGroups,
 			SubnetId:         aws.String(config.SubnetID),
 			UserData:         aws.String(config.UserData),
+			DisableApiTermination: aws.Bool(true), // Enable deletion protection
 			TagSpecifications: []types.TagSpecification{
 				{
 					ResourceType: types.ResourceTypeInstance,
@@ -182,7 +209,7 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 			}
 		}
 		
-		result, runErr = s.client.RunInstances(ctx, runInstancesInput)
+		result, runErr = ec2Client.RunInstances(ctx, runInstancesInput)
 		
 		if runErr != nil && utils.IsRetryableError(runErr) {
 			return runErr
@@ -209,8 +236,21 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 
 // DeleteInstance terminates an EC2 instance with retry logic
 func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) error {
+	// First, disable deletion protection
+	_, err := s.client.ModifyInstanceAttribute(ctx, &ec2.ModifyInstanceAttributeInput{
+		InstanceId: aws.String(instanceID),
+		DisableApiTermination: &types.AttributeBooleanValue{
+			Value: aws.Bool(false),
+		},
+	})
+	if err != nil {
+		log.Printf("Warning: Failed to disable deletion protection for %s: %v", instanceID, err)
+		// Continue anyway - the instance might not have protection enabled
+	}
+	
+	// Now terminate the instance
 	retryConfig := utils.DefaultRetryConfig()
-	err := utils.RetryWithBackoff(ctx, retryConfig, func(ctx context.Context) error {
+	err = utils.RetryWithBackoff(ctx, retryConfig, func(ctx context.Context) error {
 		_, err := s.client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
 			InstanceIds: []string{instanceID},
 		})

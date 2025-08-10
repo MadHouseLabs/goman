@@ -2,11 +2,14 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
+	eventbridgetypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -104,6 +107,13 @@ func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
 			} else {
 				result.SSMProfileCreated = true
 			}
+		}
+	}
+	
+	// Step 6: Set up EventBridge rule for EC2 instance state changes
+	if awsProvider, ok := provider.(*aws.AWSProvider); ok {
+		if err := setupEC2EventRule(ctx, awsProvider, functionName); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("EventBridge setup failed: %v", err))
 		}
 	}
 	
@@ -220,6 +230,77 @@ func setupS3BucketNotifications(ctx context.Context, provider *aws.AWSProvider, 
 	_, err = s3Client.PutBucketNotificationConfiguration(ctx, notificationConfig)
 	if err != nil {
 		return fmt.Errorf("failed to set up S3 bucket notification: %w", err)
+	}
+	
+	return nil
+}
+
+// setupEC2EventRule creates an EventBridge rule to trigger Lambda on EC2 instance termination
+func setupEC2EventRule(ctx context.Context, provider *aws.AWSProvider, functionName string) error {
+	// Create EventBridge client
+	eventClient := eventbridge.NewFromConfig(provider.GetConfig())
+	lambdaClient := provider.GetLambdaClient()
+	
+	// Define the rule name
+	ruleName := "goman-ec2-termination-rule"
+	
+	// Create event pattern for EC2 instance state changes
+	eventPattern := map[string]interface{}{
+		"source":      []string{"aws.ec2"},
+		"detail-type": []string{"EC2 Instance State-change Notification"},
+		"detail": map[string]interface{}{
+			"state": []string{"terminated", "terminating", "stopped"},
+		},
+	}
+	
+	eventPatternJSON, err := json.Marshal(eventPattern)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event pattern: %w", err)
+	}
+	
+	// Create or update the rule
+	_, err = eventClient.PutRule(ctx, &eventbridge.PutRuleInput{
+		Name:         awssdk.String(ruleName),
+		Description:  awssdk.String("Trigger Lambda on EC2 instance termination for Goman clusters"),
+		EventPattern: awssdk.String(string(eventPatternJSON)),
+		State:        eventbridgetypes.RuleStateEnabled,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create EventBridge rule: %w", err)
+	}
+	
+	// Get Lambda function ARN
+	functionConfig, err := lambdaClient.GetFunction(ctx, &lambda.GetFunctionInput{
+		FunctionName: awssdk.String(functionName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get Lambda function: %w", err)
+	}
+	
+	// Add Lambda permission for EventBridge to invoke the function
+	_, err = lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
+		FunctionName: awssdk.String(functionName),
+		StatementId:  awssdk.String("eventbridge-ec2-invoke"),
+		Action:       awssdk.String("lambda:InvokeFunction"),
+		Principal:    awssdk.String("events.amazonaws.com"),
+		SourceArn:    awssdk.String(fmt.Sprintf("arn:aws:events:%s:%s:rule/%s", provider.Region(), provider.AccountID(), ruleName)),
+	})
+	if err != nil && !strings.Contains(err.Error(), "ResourceConflictException") {
+		return fmt.Errorf("failed to add Lambda permission for EventBridge: %w", err)
+	}
+	
+	// Add Lambda as target for the rule
+	_, err = eventClient.PutTargets(ctx, &eventbridge.PutTargetsInput{
+		Rule: awssdk.String(ruleName),
+		Targets: []eventbridgetypes.Target{
+			{
+				Id:  awssdk.String("1"),
+				Arn: functionConfig.Configuration.FunctionArn,
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to add Lambda target to EventBridge rule: %w", err)
 	}
 	
 	return nil

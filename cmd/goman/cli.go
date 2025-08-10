@@ -12,6 +12,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -313,7 +314,22 @@ func (cli *CLI) cleanupInfrastructure(ctx context.Context) error {
 	
 	var errors []string
 	
-	// 1. Delete Lambda function
+	// 1. Delete EventBridge rule and Lambda function
+	fmt.Println("  • Deleting EventBridge rules...")
+	eventClient := eventbridge.NewFromConfig(cfg)
+	ruleName := "goman-ec2-termination-rule"
+	
+	// Remove targets first
+	eventClient.RemoveTargets(ctx, &eventbridge.RemoveTargetsInput{
+		Rule: awssdk.String(ruleName),
+		Ids:  []string{"1"},
+	})
+	
+	// Delete the rule
+	eventClient.DeleteRule(ctx, &eventbridge.DeleteRuleInput{
+		Name: awssdk.String(ruleName),
+	})
+	
 	fmt.Println("  • Deleting Lambda function...")
 	_, err = lambdaClient.DeleteFunction(ctx, &lambda.DeleteFunctionInput{
 		FunctionName: awssdk.String(functionName),
