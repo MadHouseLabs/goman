@@ -237,6 +237,45 @@ func (m *Manager) GetClusterByID(clusterID string) (*models.K3sCluster, error) {
 	return nil, fmt.Errorf("cluster not found: %s", clusterID)
 }
 
+// GetClusterDetails returns detailed cluster information including instance status
+func (m *Manager) GetClusterDetails(clusterName string) (*storage.K3sClusterState, error) {
+	if m.storage == nil {
+		return nil, fmt.Errorf("storage not available")
+	}
+	
+	// Load the full state from storage
+	state, err := m.storage.LoadClusterState(clusterName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load cluster state: %w", err)
+	}
+	
+	return state, nil
+}
+
+// GetAllClusterStates returns states for all clusters
+func (m *Manager) GetAllClusterStates() map[string]*storage.K3sClusterState {
+	states := make(map[string]*storage.K3sClusterState)
+	
+	if m.storage == nil {
+		return states
+	}
+	
+	// Load states for all clusters
+	m.mu.RLock()
+	clusters := make([]models.K3sCluster, len(m.clusters))
+	copy(clusters, m.clusters)
+	m.mu.RUnlock()
+	
+	for _, cluster := range clusters {
+		state, err := m.storage.LoadClusterState(cluster.Name)
+		if err == nil && state != nil {
+			states[cluster.Name] = state
+		}
+	}
+	
+	return states
+}
+
 // SyncFromProvider syncs cluster state from the cloud provider
 func (m *Manager) SyncFromProvider() error {
 	// Ensure infrastructure is set up before syncing

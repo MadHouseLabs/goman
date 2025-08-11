@@ -16,10 +16,12 @@ import (
 	eventbridgetypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/madhouselabs/goman/pkg/logger"
 	"github.com/madhouselabs/goman/pkg/provider"
@@ -301,6 +303,15 @@ func (p *AWSProvider) Initialize(ctx context.Context) (*provider.InitializeResul
 			result.Errors = append(result.Errors, fmt.Sprintf("S3 notifications: %v", lastErr))
 		}
 		
+		// Set up SQS queue for reconciliation requeue
+		queueURL, err := p.setupSQSQueue(ctx, functionName)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("SQS queue: %v", err))
+		} else {
+			result.Resources["sqs_queue"] = queueURL
+			logger.Printf("Created SQS queue for reconciliation: %s", queueURL)
+		}
+		
 		// Set up EventBridge rule for EC2 state changes
 		if err := p.setupEventBridgeRule(ctx, functionName); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("EventBridge rule: %v", err))
@@ -580,6 +591,86 @@ func (p *AWSProvider) setupS3Notifications(ctx context.Context, functionName str
 	}
 	
 	return nil
+}
+
+// setupSQSQueue creates an SQS queue for reconciliation requeue
+func (p *AWSProvider) setupSQSQueue(ctx context.Context, functionName string) (string, error) {
+	sqsClient := sqs.NewFromConfig(p.cfg)
+	queueName := fmt.Sprintf("goman-reconcile-queue-%s", p.accountID)
+	
+	// Create or get the queue
+	createResult, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName),
+		Attributes: map[string]string{
+			"MessageRetentionPeriod": "3600",  // 1 hour
+			"VisibilityTimeout":      "300",    // 5 minutes (match Lambda timeout)
+			"MaximumMessageSize":     "262144", // 256 KB
+		},
+	})
+	if err != nil {
+		// If queue already exists, get its URL
+		if strings.Contains(err.Error(), "QueueAlreadyExists") {
+			getResult, getErr := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
+				QueueName: aws.String(queueName),
+			})
+			if getErr != nil {
+				return "", fmt.Errorf("failed to get existing queue URL: %w", getErr)
+			}
+			createResult = &sqs.CreateQueueOutput{
+				QueueUrl: getResult.QueueUrl,
+			}
+		} else {
+			return "", fmt.Errorf("failed to create SQS queue: %w", err)
+		}
+	}
+	
+	queueURL := *createResult.QueueUrl
+	
+	// Get queue ARN
+	queueAttrs, err := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(queueURL),
+		AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameAll},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get queue ARN: %w", err)
+	}
+	
+	queueArn := queueAttrs.Attributes["QueueArn"]
+	
+	// Check if mapping already exists
+	listResult, err := p.lambdaClient.ListEventSourceMappings(ctx, &lambda.ListEventSourceMappingsInput{
+		FunctionName: aws.String(functionName),
+		EventSourceArn: aws.String(queueArn),
+	})
+	
+	if err == nil && len(listResult.EventSourceMappings) == 0 {
+		// Create new event source mapping
+		_, err = p.lambdaClient.CreateEventSourceMapping(ctx, &lambda.CreateEventSourceMappingInput{
+			EventSourceArn: aws.String(queueArn),
+			FunctionName:   aws.String(functionName),
+			BatchSize:      aws.Int32(1), // Process one message at a time
+			Enabled:        aws.Bool(true),
+		})
+		if err != nil {
+			return queueURL, fmt.Errorf("failed to create event source mapping: %w", err)
+		}
+		logger.Printf("Created SQS event source mapping for Lambda function %s", functionName)
+	}
+	
+	// Update Lambda environment variables to include queue URL
+	_, err = p.lambdaClient.UpdateFunctionConfiguration(ctx, &lambda.UpdateFunctionConfigurationInput{
+		FunctionName: aws.String(functionName),
+		Environment: &lambdatypes.Environment{
+			Variables: map[string]string{
+				"RECONCILE_QUEUE_URL": queueURL,
+			},
+		},
+	})
+	if err != nil {
+		logger.Printf("Warning: Failed to update Lambda environment with queue URL: %v", err)
+	}
+	
+	return queueURL, nil
 }
 
 // setupEventBridgeRule creates an EventBridge rule to trigger Lambda on EC2 instance state changes

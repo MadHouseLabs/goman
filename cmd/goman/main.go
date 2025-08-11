@@ -309,7 +309,9 @@ func (m model) View() string {
 
 	switch m.state {
 	case viewList:
-		return ui.RenderClusterList(m.width, m.height, m.clusters, m.selectedIndex, m.message, m.err, ui.KeyMap{})
+		// Get all cluster states for enhanced list view
+		states := m.clusterManager.GetAllClusterStates()
+		return ui.RenderProListWithStatesAndWidth(m.clusters, states, m.selectedIndex, m.width)
 	case viewCreate:
 		if m.form != nil {
 			return m.form.RenderViewport(m.width, m.height)
@@ -317,7 +319,13 @@ func (m model) View() string {
 		return "Form not initialized"
 	case viewDetail:
 		if m.selectedCluster != nil {
-			return ui.RenderProDetail(*m.selectedCluster)
+			// Try to get detailed state
+			state, err := m.clusterManager.GetClusterDetails(m.selectedCluster.Name)
+			if err != nil {
+				// Fallback to basic view if state unavailable
+				return ui.RenderProDetail(*m.selectedCluster)
+			}
+			return ui.RenderProDetailWithState(*m.selectedCluster, state)
 		}
 		return "No cluster selected"
 	case viewConfirmDelete:

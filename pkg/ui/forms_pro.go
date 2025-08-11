@@ -771,8 +771,17 @@ func (f *ProForm) GetCluster() models.K3sCluster {
 		kubeVersion = strings.Split(kubeVersion, "+")[0]
 	}
 	
+	// Determine mode based on node count
+	mode := models.ModeHA
+	if totalNodeCount == 1 {
+		mode = models.ModeDeveloper
+	}
+	
 	return models.K3sCluster{
 		Name:           nameValue,
+		Region:         regionValue,
+		Mode:           mode,
+		InstanceType:   instanceValue,
 		K3sVersion:     versionValue,
 		KubeVersion:    kubeVersion,
 		MasterNodes:    masterNodes,

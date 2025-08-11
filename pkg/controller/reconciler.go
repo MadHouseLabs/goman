@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/madhouselabs/goman/pkg/config"
@@ -191,10 +192,18 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 	computeService := r.provider.GetComputeService()
 
 	// First, check for existing instances for this cluster
-	existingInstances, err := computeService.ListInstances(ctx, map[string]string{
+	filters := map[string]string{
 		"tag:Cluster":         resource.Name,
 		"instance-state-name": "pending,running,stopping,stopped",
-	})
+	}
+	
+	// Add region filter if specified in the resource
+	if resource.Spec.Region != "" {
+		filters["region"] = resource.Spec.Region
+		log.Printf("Querying instances for cluster %s in region %s", resource.Name, resource.Spec.Region)
+	}
+	
+	existingInstances, err := computeService.ListInstances(ctx, filters)
 	if err != nil {
 		log.Printf("Warning: failed to list existing instances: %v", err)
 		existingInstances = nil
@@ -227,9 +236,15 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 		
 		// Add any new instances not in Status.Instances
 		for _, inst := range instanceMap {
+			// Determine role from name
+			role := "worker"
+			if strings.Contains(inst.Name, "master") {
+				role = "master"
+			}
 			resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
 				InstanceID: inst.ID,
 				Name:       inst.Name,
+				Role:       role,
 				State:      inst.State,
 				PrivateIP:  inst.PrivateIP,
 				PublicIP:   inst.PublicIP,
@@ -285,9 +300,15 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 			for _, awsInst := range existingInstances {
 				if awsInst.Name == nodeName {
 					log.Printf("Instance %s already exists in cloud provider, adding to state", nodeName)
+					// Determine role from name
+					role := "worker"
+					if strings.Contains(nodeName, "master") {
+						role = "master"
+					}
 					resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
 						InstanceID: awsInst.ID,
 						Name:       awsInst.Name,
+						Role:       role,
 						State:      awsInst.State,
 						PrivateIP:  awsInst.PrivateIP,
 						PublicIP:   awsInst.PublicIP,
@@ -301,9 +322,15 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 			if !nodeInCloud {
 				// Need to create this node - add placeholder first
 				log.Printf("Adding placeholder for instance %s", nodeName)
+				// Determine role from name
+				role := "worker"
+				if strings.Contains(nodeName, "master") {
+					role = "master"
+				}
 				resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
 					InstanceID: "", // Will be filled when creation completes
 					Name:       nodeName,
+					Role:       role,
 					State:      "initiating",
 					PrivateIP:  "",
 					PublicIP:   "",
@@ -385,24 +412,31 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 		}, nil
 	}
 
-	// Check if all instances are running
-	allRunning := true
+	// Check if all instances are running and have IP addresses
+	allReady := true
+	missingInfo := []string{}
+	
 	for _, inst := range resource.Status.Instances {
 		if inst.State != "running" {
-			allRunning = false
-			break
+			allReady = false
+			missingInfo = append(missingInfo, fmt.Sprintf("%s is %s", inst.Name, inst.State))
+		} else if inst.PrivateIP == "" {
+			// Instance is running but doesn't have IP yet
+			allReady = false
+			missingInfo = append(missingInfo, fmt.Sprintf("%s missing private IP", inst.Name))
 		}
 	}
 
-	if !allRunning {
-		// Wait for instances to be ready
+	if !allReady {
+		// Wait for instances to be fully ready
+		resource.Status.Message = fmt.Sprintf("Waiting for instances: %s", strings.Join(missingInfo, ", "))
 		return &models.ReconcileResult{
 			Requeue:      true,
 			RequeueAfter: 10 * time.Second,
 		}, nil
 	}
 
-	// All instances ready, move to running
+	// All instances ready with IPs, move to running
 	resource.Status.Phase = models.ClusterPhaseRunning
 	resource.Status.Message = "Cluster is running"
 	resource.Status.ObservedGeneration = resource.Generation
@@ -432,6 +466,44 @@ func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.Clus
 		resource.Status.ObservedGeneration = resource.Generation
 	}
 
+	// Update instance states from cloud provider to keep IP addresses current
+	computeService := r.provider.GetComputeService()
+	filters := map[string]string{
+		"tag:Cluster":         resource.Name,
+		"instance-state-name": "pending,running,stopping,stopped",
+	}
+	
+	// Add region filter if specified in the resource
+	if resource.Spec.Region != "" {
+		filters["region"] = resource.Spec.Region
+		log.Printf("Updating instance states for cluster %s in region %s", resource.Name, resource.Spec.Region)
+	}
+	
+	cloudInstances, err := computeService.ListInstances(ctx, filters)
+	if err != nil {
+		log.Printf("Warning: failed to list instances for health check: %v", err)
+	} else if len(cloudInstances) > 0 {
+		// Update Status.Instances with current state from cloud
+		instanceMap := make(map[string]*provider.Instance)
+		for _, inst := range cloudInstances {
+			instanceMap[inst.Name] = inst
+		}
+		
+		// Update existing entries in Status.Instances
+		for i := range resource.Status.Instances {
+			if cloudInst, ok := instanceMap[resource.Status.Instances[i].Name]; ok {
+				// Update with current state from cloud
+				resource.Status.Instances[i].State = cloudInst.State
+				resource.Status.Instances[i].PrivateIP = cloudInst.PrivateIP
+				resource.Status.Instances[i].PublicIP = cloudInst.PublicIP
+				log.Printf("Updated instance %s: PrivateIP=%s, PublicIP=%s", 
+					resource.Status.Instances[i].Name, 
+					cloudInst.PrivateIP, 
+					cloudInst.PublicIP)
+			}
+		}
+	}
+
 	// Update last reconcile time
 	now := time.Now()
 	resource.Status.LastReconcileTime = &now
@@ -457,7 +529,6 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.Clu
 	computeService := r.provider.GetComputeService()
 
 	// First, check if any instances still exist in the cloud provider
-	// Include the region in the filters if available
 	filters := map[string]string{
 		"tag:Cluster":         resource.Name,
 		"instance-state-name": "pending,running,stopping,stopped", // Don't include "terminated"
@@ -466,7 +537,7 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.Clu
 	// Add region filter if the cluster has a region specified
 	if resource.Spec.Region != "" {
 		filters["region"] = resource.Spec.Region
-		log.Printf("Checking for instances in region: %s", resource.Spec.Region)
+		log.Printf("Checking for instances to delete in region: %s", resource.Spec.Region)
 	}
 
 	actualInstances, err := computeService.ListInstances(ctx, filters)
