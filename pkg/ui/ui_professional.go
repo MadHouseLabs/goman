@@ -133,11 +133,7 @@ func RenderProListWithStatesAndWidth(clusters []models.K3sCluster, states map[st
 	// Calculate separator width (table width minus padding)
 	sepWidth := tableWidth - 4
 	
-	// Title
-	titleRow := proTitle.Render("KUBERNETES CLUSTERS")
-	rows = append(rows, titleRow)
-	rows = append(rows, proDim.Render(strings.Repeat("═", sepWidth)))
-	rows = append(rows, "") // Empty line
+	// No title here since viewport already has it
 	
 	// Headers
 	headers := lipgloss.JoinHorizontal(
@@ -286,12 +282,7 @@ func RenderProListWithStates(clusters []models.K3sCluster, states map[string]*st
 func RenderProListWithWidth(clusters []models.K3sCluster, selectedIndex int, width int) string {
 	var b strings.Builder
 	
-	// Header
-	b.WriteString("\n")
-	b.WriteString("  " + proDim.Render("CLUSTERS") + "\n")
-	b.WriteString("  " + proDim.Render(strings.Repeat("─", 80)) + "\n\n")
-	
-	// Column headers
+	// Column headers (no duplicate title since viewport already has it)
 	b.WriteString(fmt.Sprintf("  %-20s %-12s %-15s %-10s %-8s %-15s\n",
 		proDim.Render("NAME"),
 		proDim.Render("STATUS"),
@@ -299,7 +290,11 @@ func RenderProListWithWidth(clusters []models.K3sCluster, selectedIndex int, wid
 		proDim.Render("MODE"),
 		proDim.Render("NODES"),
 		proDim.Render("INSTANCE")))
-	b.WriteString("  " + proDim.Render(strings.Repeat("─", 80)) + "\n")
+	lineWidth := width - 4
+	if lineWidth > 80 {
+		lineWidth = 80
+	}
+	b.WriteString("  " + proDim.Render(strings.Repeat("─", lineWidth)) + "\n")
 	
 	// Simple list without extra styling
 	for i, cluster := range clusters {

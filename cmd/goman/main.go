@@ -35,6 +35,7 @@ const (
 type model struct {
 	state           viewState
 	clusters        []models.K3sCluster
+	clusterStates   map[string]*storage.K3sClusterState // Cached cluster states
 	clusterManager  *cluster.Manager
 	storage         *storage.Storage
 	config          *config.Config
@@ -55,7 +56,7 @@ type model struct {
 }
 
 func initialModel() (model, error) {
-	storage, err := storage.NewStorage()
+	stor, err := storage.NewStorage()
 	if err != nil {
 		return model{}, err
 	}
@@ -76,11 +77,13 @@ func initialModel() (model, error) {
 	// Setup viewport
 	vp := viewport.New(80, 20)
 
+	// Initialize with empty states - will be populated by first refresh
 	return model{
 		state:          viewList,
 		clusters:       clusters,
+		clusterStates:  make(map[string]*storage.K3sClusterState),
 		clusterManager: clusterManager,
-		storage:        storage,
+		storage:        stor,
 		config:         config,
 		spinner:        s,
 		viewport:       vp,
@@ -96,6 +99,7 @@ func (m model) Init() tea.Cmd {
 		m.spinner.Tick,
 		tea.EnterAltScreen,
 		m.syncClusters(),
+		m.fetchInitialStates(), // Fetch states immediately for initial render
 		m.startPolling(), // Start continuous polling for updates
 	)
 }
@@ -245,14 +249,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ui.ClusterCreatedMsg:
 		m.loading = false
 		m.clusters = m.clusterManager.GetClusters()
+		// Update cached states after cluster creation
+		m.clusterStates = m.clusterManager.GetAllClusterStates()
 		m.state = viewList
 		m.form = nil
 		m.message = ""
-		return m, tea.Batch(m.clearMessage(), m.refreshClusters())
+		// Only clear message, don't trigger refresh as polling is already running
+		return m, m.clearMessage()
 
 	case ui.ClusterDeletedMsg:
 		m.loading = false
 		m.clusters = m.clusterManager.GetClusters()
+		// Update cached states after cluster deletion
+		m.clusterStates = m.clusterManager.GetAllClusterStates()
 		if m.selectedIndex >= len(m.clusters) && m.selectedIndex > 0 {
 			m.selectedIndex--
 		}
@@ -262,6 +271,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ui.ClustersSyncedMsg:
 		m.loading = false
 		m.clusters = m.clusterManager.GetClusters()
+		// Update cached states after sync
+		m.clusterStates = m.clusterManager.GetAllClusterStates()
 		m.message = ""
 		return m, m.clearMessage()
 
@@ -269,6 +280,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Silently refresh cluster list to update statuses
 		m.clusterManager.RefreshClusterStatus()
 		m.clusters = m.clusterManager.GetClusters()
+		// Cache cluster states for rendering
+		m.clusterStates = m.clusterManager.GetAllClusterStates()
 		// Continue polling for updates
 		return m, m.startPolling()
 
@@ -309,9 +322,9 @@ func (m model) View() string {
 
 	switch m.state {
 	case viewList:
-		// Get all cluster states for enhanced list view
-		states := m.clusterManager.GetAllClusterStates()
-		return ui.RenderProListWithStatesAndWidth(m.clusters, states, m.selectedIndex, m.width)
+		// Use cached cluster states for rendering (no API calls)
+		// Use RenderClusterListWithStates to get proper viewport wrapping
+		return ui.RenderClusterListWithStates(m.width, m.height, m.clusters, m.clusterStates, m.selectedIndex)
 	case viewCreate:
 		if m.form != nil {
 			return m.form.RenderViewport(m.width, m.height)
@@ -389,9 +402,17 @@ func (m *model) clearError() tea.Cmd {
 
 // startPolling starts continuous polling for cluster updates
 func (m *model) startPolling() tea.Cmd {
-	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
 		return ui.RefreshClustersMsg{}
 	})
+}
+
+// fetchInitialStates fetches cluster states immediately for initial render
+func (m *model) fetchInitialStates() tea.Cmd {
+	return func() tea.Msg {
+		// This will be handled by RefreshClustersMsg handler
+		return ui.RefreshClustersMsg{}
+	}
 }
 
 func main() {

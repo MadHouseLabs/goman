@@ -98,10 +98,8 @@ func ensureInfrastructureSetup() error {
 
 // CreateCluster creates a new k3s cluster
 func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, error) {
-	// Ensure infrastructure is set up before creating cluster
-	if err := ensureInfrastructureSetup(); err != nil {
-		return nil, fmt.Errorf("failed to ensure infrastructure setup: %w", err)
-	}
+	// Infrastructure should already be set up at app initialization
+	// No need to check again here as it blocks the UI
 	// Generate cluster ID and set initial status
 	cluster.ID = fmt.Sprintf("k3s-%d", time.Now().Unix())
 	cluster.Status = models.StatusCreating
@@ -159,10 +157,8 @@ func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 
 // DeleteCluster deletes a cluster
 func (m *Manager) DeleteCluster(clusterID string) error {
-	// Ensure infrastructure is set up before deleting cluster
-	if err := ensureInfrastructureSetup(); err != nil {
-		return fmt.Errorf("failed to ensure infrastructure setup: %w", err)
-	}
+	// Infrastructure should already be set up at app initialization
+	// No need to check again here as it blocks the UI
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -319,7 +315,8 @@ func (m *Manager) RefreshClusterStatus() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		// Replace entire clusters slice with latest state
+		// Simply replace the entire list with what's in storage
+		// LoadAllClusterStates returns ALL clusters, so no need to merge
 		m.clusters = []models.K3sCluster{}
 		for _, state := range states {
 			m.clusters = append(m.clusters, state.Cluster)

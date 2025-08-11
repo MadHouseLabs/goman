@@ -43,18 +43,21 @@ func RenderViewport(width, height int, content string, status StatusType, status
 		Bold(true).
 		Padding(0, 1)
 	
-	title := titleStyle.Render("CLUSTERS")
+	title := titleStyle.Render("Clusters")
 	
 	// Title separator
 	separator := strings.Repeat("─", width)
 	sepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
 	
-	// Content area (calculate available height)
-	contentHeight := height - 4 // Subtract title(1) + separator(1) + status(1) + spacing(1)
+	// Content area (use all available height)
+	// Account for title (1 line), separator (1 line), status (1 line), and minimal padding
+	contentHeight := height - 3
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
 	contentStyle := lipgloss.NewStyle().
 		Width(width).
-		Height(contentHeight).
-		Padding(1, 2)
+		Height(contentHeight)
 	
 	// Status bar
 	var statusColor lipgloss.Color

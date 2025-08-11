@@ -840,12 +840,19 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 	statusState["instances"] = instanceStates
 
 	// Metadata
-	statusState["metadata"] = map[string]interface{}{
+	metadata := map[string]interface{}{
 		"last_reconciled":    time.Now().Format(time.RFC3339),
 		"phase":              resource.Status.Phase,
 		"message":            resource.Status.Message,
 		"observed_generation": resource.Status.ObservedGeneration,
 	}
+	
+	// Preserve deletion timestamp if set
+	if resource.DeletionTimestamp != nil {
+		metadata["deletion_requested"] = resource.DeletionTimestamp.Format(time.RFC3339)
+	}
+	
+	statusState["metadata"] = metadata
 
 	// Save status file
 	statusData, err := json.MarshalIndent(statusState, "", "  ")

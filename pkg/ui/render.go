@@ -8,6 +8,7 @@ import (
 	zone "github.com/lrstanley/bubblezone"
 	ui "github.com/madhouselabs/goman/internal/ui"
 	"github.com/madhouselabs/goman/pkg/models"
+	"github.com/madhouselabs/goman/pkg/storage"
 )
 
 // RenderLoading renders a loading screen
@@ -77,4 +78,25 @@ func RenderDeleteConfirmation(clusterName string, width, height int) string {
 	)
 	
 	return ui.RenderViewport(width, height, content, ui.StatusWarning, "")
+}
+
+// RenderClusterListWithStates renders the cluster list with states in a viewport
+func RenderClusterListWithStates(width, height int, clusters []models.K3sCluster, states map[string]*storage.K3sClusterState, selectedIndex int) string {
+	// Determine status
+	status := ui.StatusReady
+	statusMsg := ""
+	
+	// Get list content
+	if len(clusters) == 0 {
+		return ui.RenderEmptyViewport(width, height, status, statusMsg)
+	}
+	
+	// Render clusters list with states
+	content := RenderProListWithStatesAndWidth(clusters, states, selectedIndex, width)
+	
+	// Create viewport with proper title and height
+	viewport := ui.RenderViewport(width, height, content, status, statusMsg)
+	
+	// Scan for mouse zones
+	return zone.Scan(viewport)
 }
