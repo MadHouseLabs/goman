@@ -82,21 +82,6 @@ func RenderDeleteConfirmation(clusterName string, width, height int) string {
 
 // RenderClusterListWithStates renders the cluster list with states in a viewport
 func RenderClusterListWithStates(width, height int, clusters []models.K3sCluster, states map[string]*storage.K3sClusterState, selectedIndex int) string {
-	// Determine status
-	status := ui.StatusReady
-	statusMsg := ""
-	
-	// Get list content
-	if len(clusters) == 0 {
-		return ui.RenderEmptyViewport(width, height, status, statusMsg)
-	}
-	
-	// Render clusters list with states
-	content := RenderProListWithStatesAndWidth(clusters, states, selectedIndex, width)
-	
-	// Create viewport with proper title and height
-	viewport := ui.RenderViewport(width, height, content, status, statusMsg)
-	
-	// Scan for mouse zones
-	return zone.Scan(viewport)
+	// Use the new table view with proper scrolling and anchored footer
+	return RenderTableView(width, height, clusters, states, selectedIndex)
 }
