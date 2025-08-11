@@ -90,6 +90,8 @@ func initialModel() (model, error) {
 		help:           help.New(),
 		keys:           ui.DefaultKeyMap(),
 		selectedIndex:  0,
+		width:          80,  // Default width until window size is known
+		height:         24,  // Default height until window size is known
 	}, nil
 }
 

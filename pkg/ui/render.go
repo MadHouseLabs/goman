@@ -82,6 +82,6 @@ func RenderDeleteConfirmation(clusterName string, width, height int) string {
 
 // RenderClusterListWithStates renders the cluster list with states in a viewport
 func RenderClusterListWithStates(width, height int, clusters []models.K3sCluster, states map[string]*storage.K3sClusterState, selectedIndex int) string {
-	// Use the new table view with proper scrolling and anchored footer
-	return RenderTableView(width, height, clusters, states, selectedIndex)
+	// Use the minimal professional dashboard
+	return RenderMinimalDashboard(width, height, clusters, states, selectedIndex)
 }

@@ -12,6 +12,14 @@ import (
 
 // RenderTableView renders a full-height table view with scrolling and anchored footer
 func RenderTableView(width, height int, clusters []models.K3sCluster, states map[string]*storage.K3sClusterState, selectedIndex int) string {
+	// Ensure minimum dimensions
+	if width < 80 {
+		width = 80
+	}
+	if height < 10 {
+		height = 10
+	}
+	
 	// Calculate dimensions
 	// Title: 1 line, separator: 1 line, footer separator: 1 line, summary: 1 line, help: 1 line, padding: 2
 	footerHeight := 5
@@ -117,7 +125,11 @@ func buildTableContent(clusters []models.K3sCluster, states map[string]*storage.
 		ipWidth, "MASTER IP",
 	)
 	rows = append(rows, headerStyle.Render(headers))
-	rows = append(rows, proDim.Render(strings.Repeat("─", width-4)))
+	sepWidth := width - 4
+	if sepWidth < 0 {
+		sepWidth = 0
+	}
+	rows = append(rows, proDim.Render(strings.Repeat("─", sepWidth)))
 	
 	// Cluster rows
 	for i, cluster := range clusters {
@@ -231,7 +243,11 @@ func buildFooter(clusters []models.K3sCluster, width int) string {
 	var footer []string
 	
 	// Footer separator
-	footer = append(footer, proDim.Render(strings.Repeat("─", width-4)))
+	sepWidth := width - 4
+	if sepWidth < 0 {
+		sepWidth = 0
+	}
+	footer = append(footer, proDim.Render(strings.Repeat("─", sepWidth)))
 	
 	// Summary stats
 	runningCount := 0
