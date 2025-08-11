@@ -47,8 +47,8 @@ task deps
 # Build all binaries and Lambda packages
 task build
 
-# Run integration tests
-./test_integration.sh
+# Initialize infrastructure
+./goman init --non-interactive
 
 # Start the TUI
 ./goman
@@ -56,17 +56,65 @@ task build
 
 ## 📋 Available Commands
 
-### Basic Usage
+### TUI Mode
 
 ```bash
-# Start the TUI application
+# Start the interactive TUI
 ./goman
+```
 
+### CLI Mode
+
+```bash
+# Initialize infrastructure
+./goman init --non-interactive
+
+# Check initialization status
+./goman status
+
+# Manage clusters via CLI
+./goman cluster create <name> --region=<region> --mode=<developer|ha> --wait --json
+./goman cluster list [--region=<region>] [--json]
+./goman cluster status <name> [--json]
+./goman cluster delete <name> [--json]
+
+# List AWS resources
+./goman resources list [--region=<region>] [--json]
+
+# Cleanup infrastructure (hidden command)
+./goman uninit
+```
+
+### Build & Deploy
+
+```bash
 # Build everything
 task build
 
-# Build Lambda packages for AWS
-task build:lambda:aws
+# Build specific components
+task build:ui        # Build TUI binary
+task build:lambda    # Build Lambda package
+
+# Deploy Lambda function
+task deploy:lambda
+```
+
+### Testing
+
+```bash
+# Run quick tests
+task test:quick
+
+# Run end-to-end tests
+task test:e2e
+
+# Check AWS resources across regions
+task check:resources
+
+# Manual test scripts
+./scripts/quick_test.sh      # Quick component tests
+./scripts/e2e_test.sh        # Full end-to-end test
+./scripts/check_resources.sh # Check AWS resources
 ```
 
 ### Development

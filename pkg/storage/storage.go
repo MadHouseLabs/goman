@@ -7,7 +7,7 @@ import (
 	"github.com/madhouselabs/goman/pkg/models"
 )
 
-// Storage wraps a StorageBackend for backward compatibility
+// Storage wraps a StorageBackend
 type Storage struct {
 	backend StorageBackend
 }
@@ -25,8 +25,6 @@ type K3sClusterState struct {
 
 // NewStorage creates a new storage instance with S3 backend
 func NewStorage() (*Storage, error) {
-	// Always use S3 storage with standard configuration
-	// In Lambda environment, don't use profile - use IAM role
 	profile := os.Getenv("AWS_PROFILE")
 
 	backend, err := NewS3Backend(profile)
@@ -92,4 +90,16 @@ func (s *Storage) SaveConfig(config map[string]interface{}) error {
 // LoadConfig loads application configuration using the backend
 func (s *Storage) LoadConfig() (map[string]interface{}, error) {
 	return s.backend.LoadConfig()
+}
+
+// SaveClusterStateToKey saves cluster state to a specific key
+func (s *Storage) SaveClusterStateToKey(state *K3sClusterState, key string) error {
+	// Use the backend's SaveClusterStateToKey if available
+	if backend, ok := s.backend.(interface {
+		SaveClusterStateToKey(*K3sClusterState, string) error
+	}); ok {
+		return backend.SaveClusterStateToKey(state, key)
+	}
+	// Fallback to regular SaveClusterState
+	return s.backend.SaveClusterState(state)
 }

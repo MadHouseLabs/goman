@@ -88,25 +88,32 @@ tasks:
     cmds:
       - echo "🚀 Deploying Lambda function..."
       - |
+        # Get AWS account ID
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        FUNCTION_NAME="goman-controller-${ACCOUNT_ID}"
+        
         # Check if function exists
-        if aws lambda get-function --function-name goman-cluster-controller --region {{.AWS_REGION}} > /dev/null 2>&1; then
-          echo "📦 Updating existing Lambda function..."
+        if aws lambda get-function --function-name ${FUNCTION_NAME} --region {{.AWS_REGION}} > /dev/null 2>&1; then
+          echo "📦 Updating Lambda function ${FUNCTION_NAME}..."
           aws lambda update-function-code \
-            --function-name goman-cluster-controller \
+            --function-name ${FUNCTION_NAME} \
             --zip-file fileb://{{.BUILD_DIR}}/lambda-aws-controller.zip \
-            --region {{.AWS_REGION}}
+            --region {{.AWS_REGION}} > /dev/null
+          echo "✅ Lambda deployment complete"
         else
-          echo "❌ Lambda function 'goman-cluster-controller' does not exist."
+          echo "❌ Lambda function '${FUNCTION_NAME}' does not exist."
           echo "💡 Run 'goman init' first to initialize infrastructure."
           exit 1
         fi
-      - echo "✅ Lambda deployment complete"
 
   logs:lambda:
     desc: View Lambda function logs
     cmds:
       - echo "📋 Viewing Lambda logs..."
-      - aws logs tail /aws/lambda/goman-cluster-controller --follow --region {{.AWS_REGION}}
+      - |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        FUNCTION_NAME="goman-controller-${ACCOUNT_ID}"
+        aws logs tail /aws/lambda/${FUNCTION_NAME} --follow --region {{.AWS_REGION}}
 
   # Code quality tasks
   test:
@@ -213,6 +220,25 @@ tasks:
       # Windows
       - GOOS=windows GOARCH=amd64 go build -o dist/{{.BINARY_NAME}}-windows-amd64.exe ./cmd/goman
       - echo "✅ Release binaries built in dist/"
+
+  # Testing tasks
+  test:e2e:
+    desc: Run end-to-end tests
+    cmds:
+      - echo "🧪 Running end-to-end tests..."
+      - ./scripts/e2e_test.sh
+
+  test:quick:
+    desc: Run quick tests
+    cmds:
+      - echo "🧪 Running quick tests..."
+      - ./scripts/quick_test.sh
+
+  check:resources:
+    desc: Check AWS resources across regions
+    cmds:
+      - echo "🔍 Checking AWS resources..."
+      - ./scripts/check_resources.sh
 
   # Watch for changes (requires fswatch)
   watch:

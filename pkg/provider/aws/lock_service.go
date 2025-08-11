@@ -3,6 +3,8 @@ package aws
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -42,17 +44,19 @@ func NewLockService(client *dynamodb.Client, accountID string) *LockService {
 
 // Initialize ensures the DynamoDB table exists
 func (s *LockService) Initialize(ctx context.Context) error {
-	// Check if table exists
 	_, err := s.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(s.tableName),
 	})
 
 	if err == nil {
-		// Table exists
 		return nil
 	}
 
-	// Create table - only if we have permission
+	if os.Getenv("LAMBDA_TASK_ROOT") != "" {
+		log.Printf("Warning: Could not describe DynamoDB table %s in Lambda environment: %v", s.tableName, err)
+		return nil
+	}
+
 	_, err = s.client.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName: aws.String(s.tableName),
 		KeySchema: []types.KeySchemaElement{
@@ -84,7 +88,6 @@ func (s *LockService) Initialize(ctx context.Context) error {
 		return fmt.Errorf("failed to create lock table: %w", err)
 	}
 
-	// Wait for table to be active
 	waiter := dynamodb.NewTableExistsWaiter(s.client)
 	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(s.tableName),
@@ -115,7 +118,6 @@ func (s *LockService) AcquireLock(ctx context.Context, resourceID string, owner 
 		return "", fmt.Errorf("failed to marshal lock item: %w", err)
 	}
 
-	// Try to put item with condition that it doesn't exist or has expired
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName:           aws.String(s.tableName),
 		Item:                av,
@@ -126,9 +128,7 @@ func (s *LockService) AcquireLock(ctx context.Context, resourceID string, owner 
 	})
 
 	if err != nil {
-		// Check if it's a conditional check failure
 		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
-			// Lock is held by another process
 			locked, lockOwner, _ := s.IsLocked(ctx, resourceID)
 			if locked {
 				return "", fmt.Errorf("resource %s is locked by %s", resourceID, lockOwner)
@@ -158,7 +158,6 @@ func (s *LockService) ReleaseLock(ctx context.Context, resourceID string, token 
 	})
 
 	if err != nil {
-		// Check if it's a conditional check failure
 		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
 			return fmt.Errorf("invalid token or lock already released")
 		}
@@ -190,7 +189,6 @@ func (s *LockService) RenewLock(ctx context.Context, resourceID string, token st
 	})
 
 	if err != nil {
-		// Check if it's a conditional check failure
 		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
 			return fmt.Errorf("invalid token or lock expired")
 		}
@@ -214,7 +212,6 @@ func (s *LockService) IsLocked(ctx context.Context, resourceID string) (bool, st
 	}
 
 	if len(result.Item) == 0 {
-		// No lock exists
 		return false, "", nil
 	}
 
@@ -224,9 +221,7 @@ func (s *LockService) IsLocked(ctx context.Context, resourceID string) (bool, st
 		return false, "", fmt.Errorf("failed to unmarshal lock item: %w", err)
 	}
 
-	// Check if lock has expired
 	if item.ExpiresAt < time.Now().Unix() {
-		// Lock has expired
 		return false, "", nil
 	}
 

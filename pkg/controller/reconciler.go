@@ -200,10 +200,33 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 		existingInstances = nil
 	}
 
-	// Populate Status.Instances with existing instances
-	if len(existingInstances) > 0 && len(resource.Status.Instances) == 0 {
+	// Update Status.Instances with current state from cloud provider
+	if len(existingInstances) > 0 {
 		log.Printf("Found %d existing instances for cluster %s", len(existingInstances), resource.Name)
+		
+		// Build a map of existing instances for quick lookup
+		instanceMap := make(map[string]*provider.Instance)
 		for _, inst := range existingInstances {
+			instanceMap[inst.Name] = inst
+		}
+		
+		// Update existing entries in Status.Instances
+		for i := range resource.Status.Instances {
+			if cloudInst, ok := instanceMap[resource.Status.Instances[i].Name]; ok {
+				// Update with current state from cloud
+				resource.Status.Instances[i].InstanceID = cloudInst.ID
+				resource.Status.Instances[i].State = cloudInst.State
+				resource.Status.Instances[i].PrivateIP = cloudInst.PrivateIP
+				resource.Status.Instances[i].PublicIP = cloudInst.PublicIP
+				if cloudInst.LaunchTime.After(resource.Status.Instances[i].LaunchTime) {
+					resource.Status.Instances[i].LaunchTime = cloudInst.LaunchTime
+				}
+				delete(instanceMap, resource.Status.Instances[i].Name)
+			}
+		}
+		
+		// Add any new instances not in Status.Instances
+		for _, inst := range instanceMap {
 			resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
 				InstanceID: inst.ID,
 				Name:       inst.Name,
@@ -395,14 +418,9 @@ func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.Clus
 
 	// Check if spec changed
 	if resource.Generation != resource.Status.ObservedGeneration {
-		// Handle updates (e.g., mode change)
-		masterCount := 0
-		for _, inst := range resource.Status.Instances {
-			if inst.Role == "master" {
-				masterCount++
-			}
-		}
-		if masterCount != resource.Spec.MasterCount {
+		// Handle updates (e.g., need more/fewer instances)
+		currentCount := len(resource.Status.Instances)
+		if currentCount != resource.Spec.MasterCount {
 			resource.Status.Phase = models.ClusterPhaseProvisioning
 			resource.Status.Message = "Updating cluster configuration"
 			return &models.ReconcileResult{
@@ -410,6 +428,8 @@ func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.Clus
 				RequeueAfter: 5 * time.Second,
 			}, nil
 		}
+		// Update observed generation since we're in sync
+		resource.Status.ObservedGeneration = resource.Generation
 	}
 
 	// Update last reconcile time
@@ -466,13 +486,21 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, resource *models.Clu
 			}
 		}
 
-		// Delete the resource from storage (single JSON file)
-		clusterKey := fmt.Sprintf("clusters/%s.json", resource.Name)
-		if err := r.provider.GetStorageService().DeleteObject(ctx, clusterKey); err != nil {
-			log.Printf("Failed to delete cluster file: %v", err)
-		} else {
-			log.Printf("Deleted cluster file for %s", resource.Name)
+		// Delete the resource from storage (both config and status files)
+		configKey := fmt.Sprintf("clusters/%s/config.json", resource.Name)
+		statusKey := fmt.Sprintf("clusters/%s/status.json", resource.Name)
+		
+		// Delete config file
+		if err := r.provider.GetStorageService().DeleteObject(ctx, configKey); err != nil {
+			log.Printf("Failed to delete config file: %v", err)
 		}
+		
+		// Delete status file
+		if err := r.provider.GetStorageService().DeleteObject(ctx, statusKey); err != nil {
+			log.Printf("Failed to delete status file: %v", err)
+		}
+		
+		log.Printf("Deleted cluster files for %s", resource.Name)
 
 		log.Printf("Cluster %s deleted successfully", resource.Name)
 		return &models.ReconcileResult{}, nil // No requeue, deletion complete
@@ -536,22 +564,46 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 	loadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Load from cluster file
-	// Format: clusters/{cluster-name}.json
-	storageKey := fmt.Sprintf("clusters/%s.json", name)
+	// Load from new format only: separate config and status files
+	configKey := fmt.Sprintf("clusters/%s/config.json", name)
+	statusKey := fmt.Sprintf("clusters/%s/status.json", name)
 
-	data, err := r.provider.GetStorageService().GetObject(loadCtx, storageKey)
+	// Load config (required)
+	configData, err := r.provider.GetStorageService().GetObject(loadCtx, configKey)
 	if err != nil {
-		return nil, fmt.Errorf("cluster %s not found in storage", name)
+		return nil, fmt.Errorf("cluster config %s not found: %w", name, err)
 	}
 
-	// Parse the cluster state
-	var clusterState map[string]interface{}
-	if err := json.Unmarshal(data, &clusterState); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cluster state: %w", err)
+	var config map[string]interface{}
+	if err := json.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal cluster config: %w", err)
 	}
 
-	// Convert to ClusterResource
+	// Load status (optional - might not exist for new clusters)
+	var status map[string]interface{}
+	statusData, err := r.provider.GetStorageService().GetObject(loadCtx, statusKey)
+	if err == nil {
+		if err := json.Unmarshal(statusData, &status); err != nil {
+			log.Printf("Warning: Failed to unmarshal status for %s: %v", name, err)
+			status = make(map[string]interface{})
+		}
+	} else {
+		// No status file yet, initialize empty
+		status = make(map[string]interface{})
+	}
+
+	// Merge config and status to create full state
+	clusterState := make(map[string]interface{})
+	clusterState["cluster"] = config["cluster"]
+	if statusCluster, ok := status["cluster"].(map[string]interface{}); ok {
+		// Merge status into cluster
+		if cluster, ok := clusterState["cluster"].(map[string]interface{}); ok {
+			cluster["status"] = statusCluster["status"]
+		}
+	}
+	clusterState["instance_ids"] = status["instance_ids"]
+	clusterState["metadata"] = status["metadata"]
+
 	return r.convertStateToResource(clusterState)
 }
 
@@ -589,27 +641,24 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 		}
 	}
 
-	// Extract master nodes to get node count, instance type, and region
+	// Always check for region in cluster config first (it's a cluster-level property)
+	if region := getStringFromMap(cluster, "region"); region != "" {
+		resource.Spec.Region = region
+		log.Printf("Setting region from cluster config: %s", region)
+	}
+
+	// Check for instance_type in cluster config
+	if instanceType := getStringFromMap(cluster, "instance_type"); instanceType != "" {
+		resource.Spec.InstanceType = instanceType
+	}
+
+	// Extract master nodes to get node count and possibly override instance type
 	if masterNodes, ok := cluster["master_nodes"].([]interface{}); ok && len(masterNodes) > 0 {
 		resource.Spec.MasterCount = len(masterNodes)
 		if node, ok := masterNodes[0].(map[string]interface{}); ok {
 			if instanceType := getStringFromMap(node, "instance_type"); instanceType != "" {
 				resource.Spec.InstanceType = instanceType
 			}
-			// Extract region from node
-			if region := getStringFromMap(node, "region"); region != "" {
-				resource.Spec.Region = region
-			}
-		}
-	} else {
-		// Check for instance_type in cluster config
-		if instanceType := getStringFromMap(cluster, "instance_type"); instanceType != "" {
-			resource.Spec.InstanceType = instanceType
-		}
-
-		// Check for region in cluster config
-		if region := getStringFromMap(cluster, "region"); region != "" {
-			resource.Spec.Region = region
 		}
 	}
 
@@ -685,71 +734,62 @@ func mapPhaseToStatus(phase string) string {
 	}
 }
 
-// saveClusterResource saves cluster resource to storage with timeout
+// saveClusterResource saves ONLY the status to storage (never modifies config)
 func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.ClusterResource) error {
 	// Create a timeout context for saving (30 seconds)
 	saveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Save cluster state as single JSON file
-	stateKey := fmt.Sprintf("clusters/%s.json", resource.Name)
-	existingData, err := r.provider.GetStorageService().GetObject(saveCtx, stateKey)
+	// IMPORTANT: Only save status, never modify config
+	statusKey := fmt.Sprintf("clusters/%s/status.json", resource.Name)
 
-	var clusterState map[string]interface{}
-	if err == nil {
-		// Parse existing state
-		json.Unmarshal(existingData, &clusterState)
-	} else {
-		// Create new state structure
-		clusterState = make(map[string]interface{})
+	// Create status structure
+	statusState := make(map[string]interface{})
+
+	// Status cluster info (reconciler-controlled fields only)
+	statusState["cluster"] = map[string]interface{}{
+		"status":     mapPhaseToStatus(resource.Status.Phase),
+		"updated_at": time.Now().Format(time.RFC3339),
 	}
 
-	// Update cluster information
-	if cluster, ok := clusterState["cluster"].(map[string]interface{}); ok {
-		// Update existing cluster
-		cluster["status"] = mapPhaseToStatus(resource.Status.Phase)
-		cluster["updated_at"] = time.Now().Format(time.RFC3339)
-		cluster["mode"] = resource.Spec.Mode
-	} else {
-		// Create minimal cluster info
-		clusterState["cluster"] = map[string]interface{}{
-			"id":         resource.ClusterID,
-			"name":       resource.Name,
-			"status":     mapPhaseToStatus(resource.Status.Phase),
-			"mode":       resource.Spec.Mode,
-			"updated_at": time.Now().Format(time.RFC3339),
-		}
-	}
-
-	// Update instance IDs
+	// Instance IDs and their states
 	instanceIDs := make(map[string]string)
+	instanceStates := make(map[string]interface{})
 	for _, inst := range resource.Status.Instances {
 		instanceIDs[inst.Name] = inst.InstanceID
-	}
-	clusterState["instance_ids"] = instanceIDs
-
-	// Update metadata
-	if metadata, ok := clusterState["metadata"].(map[string]interface{}); ok {
-		metadata["last_reconciled"] = time.Now().Format(time.RFC3339)
-		metadata["phase"] = resource.Status.Phase
-	} else {
-		clusterState["metadata"] = map[string]interface{}{
-			"last_reconciled": time.Now().Format(time.RFC3339),
-			"phase":           resource.Status.Phase,
+		instanceStates[inst.Name] = map[string]interface{}{
+			"id":         inst.InstanceID,
+			"state":      inst.State,
+			"private_ip": inst.PrivateIP,
+			"public_ip":  inst.PublicIP,
+			"role":       inst.Role,
 		}
 	}
+	statusState["instance_ids"] = instanceIDs
+	statusState["instances"] = instanceStates
 
-	// Save updated state to individual file
-	updatedData, err := json.MarshalIndent(clusterState, "", "  ")
-	if err == nil {
-		if err := r.provider.GetStorageService().PutObject(saveCtx, stateKey, updatedData); err != nil {
-			log.Printf("Failed to save cluster state: %v", err)
-		}
+	// Metadata
+	statusState["metadata"] = map[string]interface{}{
+		"last_reconciled":    time.Now().Format(time.RFC3339),
+		"phase":              resource.Status.Phase,
+		"message":            resource.Status.Message,
+		"observed_generation": resource.Status.ObservedGeneration,
 	}
 
-	log.Printf("Saved cluster resource %s with phase %s", resource.Name, resource.Status.Phase)
+	// Save status file
+	statusData, err := json.MarshalIndent(statusState, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal status: %w", err)
+	}
+
+	if err := r.provider.GetStorageService().PutObject(saveCtx, statusKey, statusData); err != nil {
+		return fmt.Errorf("failed to save cluster status: %w", err)
+	}
+
+	log.Printf("Saved cluster status for %s with phase %s", resource.Name, resource.Status.Phase)
 	return nil
 }
+
 
 // sendNotification sends a notification
 func (r *Reconciler) sendNotification(ctx context.Context, notificationType, message string) {

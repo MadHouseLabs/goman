@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -82,7 +83,7 @@ func NewS3Backend(profile string) (*S3Backend, error) {
 	}, nil
 }
 
-// Initialize creates the S3 bucket if it doesn't exist and migrates old data
+// Initialize creates the S3 bucket if it doesn't exist
 func (s *S3Backend) Initialize() error {
 	ctx := context.Background()
 
@@ -109,21 +110,12 @@ func (s *S3Backend) Initialize() error {
 
 		_, createErr := s.client.CreateBucket(ctx, createInput)
 		if createErr != nil {
-			// Check if bucket already exists (race condition or cross-region)
 			if !strings.Contains(createErr.Error(), "BucketAlreadyExists") &&
 				!strings.Contains(createErr.Error(), "BucketAlreadyOwnedByYou") {
 				return fmt.Errorf("failed to create S3 bucket %s in region %s: %w", s.bucketName, s.region, createErr)
 			}
-			// Bucket exists, that's fine
-			// Bucket already exists, continue silently
-		} else {
-			// Successfully created bucket without versioning
 		}
-	} else {
-		// Bucket exists, continue silently
 	}
-
-	// No migration needed - we're using individual files per cluster
 
 	return nil
 }
@@ -265,136 +257,154 @@ func (s *S3Backend) SaveClusterState(state *K3sClusterState) error {
 	return nil
 }
 
+// SaveClusterStateToKey saves cluster state to a specific S3 key
+func (s *S3Backend) SaveClusterStateToKey(state *K3sClusterState, key string) error {
+	if state == nil {
+		return fmt.Errorf("invalid cluster state")
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal cluster state: %w", err)
+	}
+
+	// Save to S3 with the specified key
+	fullKey := s.getKey(key)
+	if err := s.putObject(context.Background(), fullKey, data); err != nil {
+		return fmt.Errorf("failed to save cluster state to %s: %w", key, err)
+	}
+
+	return nil
+}
+
 // LoadClusterState loads complete cluster state from S3
 func (s *S3Backend) LoadClusterState(clusterName string) (*K3sClusterState, error) {
-	// Load cluster state by name: clusters/{cluster-name}.json
-	key := s.getKey(fmt.Sprintf("clusters/%s.json", clusterName))
-	data, err := s.getObject(context.Background(), key)
+	ctx := context.Background()
+	
+	// Load config file
+	configKey := s.getKey(fmt.Sprintf("clusters/%s/config.json", clusterName))
+	configData, err := s.getObject(ctx, configKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cluster %s config not found: %w", clusterName, err)
 	}
-
+	
 	var state K3sClusterState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
+	
+	// Load config
+	var configState map[string]interface{}
+	if err := json.Unmarshal(configData, &configState); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
-
+	
+	// Extract cluster from config
+	if clusterData, ok := configState["cluster"].(map[string]interface{}); ok {
+		clusterJSON, _ := json.Marshal(clusterData)
+		json.Unmarshal(clusterJSON, &state.Cluster)
+	}
+	
+	// Try to load status (optional - may not exist for new clusters)
+	statusKey := s.getKey(fmt.Sprintf("clusters/%s/status.json", clusterName))
+	statusData, statusErr := s.getObject(ctx, statusKey)
+	
+	if statusErr == nil {
+		var statusState map[string]interface{}
+		if err := json.Unmarshal(statusData, &statusState); err == nil {
+			// Merge status into cluster
+			if statusCluster, ok := statusState["cluster"].(map[string]interface{}); ok {
+				if status, ok := statusCluster["status"].(string); ok {
+					state.Cluster.Status = models.ClusterStatus(status)
+				}
+				if updatedAt, ok := statusCluster["updated_at"].(string); ok {
+					if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+						state.Cluster.UpdatedAt = t
+					}
+				}
+			}
+			
+			// Extract instance IDs and metadata
+			if instanceIDs, ok := statusState["instance_ids"].(map[string]interface{}); ok {
+				state.InstanceIDs = make(map[string]string)
+				for k, v := range instanceIDs {
+					if id, ok := v.(string); ok {
+						state.InstanceIDs[k] = id
+					}
+				}
+			}
+			
+			if metadata, ok := statusState["metadata"].(map[string]interface{}); ok {
+				state.Metadata = metadata
+			}
+		}
+	}
+	
 	return &state, nil
 }
 
 // LoadAllClusterStates loads all cluster states from S3
-// Loads from individual cluster files
+// Only supports new format: clusters/{name}/config.json + status.json
 func (s *S3Backend) LoadAllClusterStates() ([]*K3sClusterState, error) {
-	// List all cluster files in the new location
-	// Note: prefix is already "state/default", so we just need "clusters/"
+	// List all cluster files
 	keys, err := s.listObjects(context.Background(), "clusters/")
 	if err != nil {
 		return nil, err
 	}
 
 	var states []*K3sClusterState
+	processedClusters := make(map[string]bool)
+	
 	for _, key := range keys {
-		// Only process JSON files
-		if !strings.HasSuffix(key, ".json") {
+		// Only process config.json files
+		if !strings.HasSuffix(key, "/config.json") {
 			continue
 		}
-
-		// Load individual cluster state
-		// Note: listObjects returns keys without prefix, but getObject needs the full key
-		fullKey := s.getKey(key)
-		data, err := s.getObject(context.Background(), fullKey)
+		
+		// Extract cluster name from key: clusters/{name}/config.json
+		parts := strings.Split(key, "/")
+		if len(parts) < 3 {
+			continue
+		}
+		
+		clusterName := parts[1]
+		
+		// Skip if already processed
+		if processedClusters[clusterName] {
+			continue
+		}
+		
+		// Load the cluster state
+		state, err := s.LoadClusterState(clusterName)
 		if err != nil {
-			continue // Skip files that can't be read
+			continue // Skip clusters that can't be loaded
 		}
-
-		var state K3sClusterState
-		if err := json.Unmarshal(data, &state); err != nil {
-			continue // Skip malformed files
-		}
-
-		states = append(states, &state)
+		
+		states = append(states, state)
+		processedClusters[clusterName] = true
 	}
 
 	return states, nil
 }
 
 // DeleteClusterState deletes cluster state from S3
-// Deletes the individual cluster file
+// Only deletes new format files
 func (s *S3Backend) DeleteClusterState(clusterName string) error {
 	ctx := context.Background()
 
-	// Delete the individual cluster file
-	key := s.getKey(fmt.Sprintf("clusters/%s.json", clusterName))
-
-	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	// Delete config and status files
+	configKey := s.getKey(fmt.Sprintf("clusters/%s/config.json", clusterName))
+	s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucketName),
-		Key:    aws.String(key),
+		Key:    aws.String(configKey),
 	})
-
-	return err
-}
-
-// saveAllClusterStates is a helper to save all states to single file
-func (s *S3Backend) saveAllClusterStates(states []*K3sClusterState) error {
-	data, err := json.MarshalIndent(states, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	key := s.getKey("clusters.json")
-	return s.putObject(context.Background(), key, data)
-}
-
-// migrateToSingleFile migrates old individual cluster files to single file
-func (s *S3Backend) migrateToSingleFile() error {
-	// Check if single file already exists
-	_, err := s.getObject(context.Background(), s.getKey("clusters.json"))
-	if err == nil {
-		// Single file exists, no migration needed
-		return nil
-	}
-
-	// Check for old individual files
-	keys, err := s.listObjects(context.Background(), "clusters/")
-	if err != nil {
-		return nil // No old files, nothing to migrate
-	}
-
-	var states []*K3sClusterState
-	var hasOldFiles bool
-
-	for _, key := range keys {
-		if strings.HasSuffix(key, ".state.json") {
-			hasOldFiles = true
-			data, err := s.getObject(context.Background(), s.getKey(key))
-			if err != nil {
-				continue
-			}
-
-			var state K3sClusterState
-			if err := json.Unmarshal(data, &state); err != nil {
-				continue
-			}
-			states = append(states, &state)
-		}
-	}
-
-	// If we found old files, save them to the new single file
-	if hasOldFiles && len(states) > 0 {
-		if err := s.saveAllClusterStates(states); err != nil {
-			return fmt.Errorf("failed to save migrated data: %w", err)
-		}
-
-		// Optionally delete old files after successful migration
-		for _, key := range keys {
-			if strings.HasSuffix(key, ".state.json") {
-				_ = s.deleteObject(context.Background(), s.getKey(key)) // Ignore delete errors
-			}
-		}
-	}
+	
+	statusKey := s.getKey(fmt.Sprintf("clusters/%s/status.json", clusterName))
+	s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(statusKey),
+	})
 
 	return nil
 }
+
 
 // SaveJob saves a job to S3
 func (s *S3Backend) SaveJob(job *models.Job) error {

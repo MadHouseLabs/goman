@@ -7,19 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
-	awssdk "github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
-	"github.com/aws/aws-sdk-go-v2/service/iam"
-	"github.com/aws/aws-sdk-go-v2/service/lambda"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	tea "github.com/charmbracelet/bubbletea"
 	zone "github.com/lrstanley/bubblezone"
-	"github.com/madhouselabs/goman/pkg/provider/aws"
-	"github.com/madhouselabs/goman/pkg/provider/registry"
 	"github.com/madhouselabs/goman/pkg/setup"
 )
 
@@ -59,6 +49,8 @@ func (cli *CLI) Run() {
 		cli.handleStatus()
 	case "cluster":
 		cli.handleCluster()
+	case "resources":
+		cli.handleResources()
 	case "uninit":
 		// Hidden command - not shown in help
 		cli.handleUninit()
@@ -72,6 +64,13 @@ func (cli *CLI) Run() {
 
 // handleInit handles the initialization command
 func (cli *CLI) handleInit() {
+	// Check for --non-interactive flag
+	for _, arg := range os.Args {
+		if arg == "--non-interactive" || arg == "-n" {
+			handleInitNonInteractive()
+			return
+		}
+	}
 	// When called directly via 'goman init', show the TUI initialization screen
 	// This provides a better user experience than CLI-only mode
 	cli.showInitPrompt()
@@ -79,12 +78,13 @@ func (cli *CLI) handleInit() {
 
 // handleUninit removes all Goman infrastructure (hidden command)
 func (cli *CLI) handleUninit() {
-	fmt.Println("WARNING: This will remove all Goman infrastructure from AWS")
+	fmt.Println("WARNING: This will remove all Goman infrastructure from your cloud provider")
 	fmt.Println("This includes:")
-	fmt.Println("  • S3 bucket and all stored data")
-	fmt.Println("  • Lambda function")
-	fmt.Println("  • DynamoDB table")
+	fmt.Println("  • Storage backend and all stored data")
+	fmt.Println("  • Serverless functions")
+	fmt.Println("  • Lock service tables")
 	fmt.Println("  • IAM roles and policies")
+	fmt.Println("  • All other provider-specific resources")
 	fmt.Println()
 	fmt.Print("Are you sure? (yes/no): ")
 
@@ -152,7 +152,7 @@ func (cli *CLI) handleStatus() {
 func (cli *CLI) handleCluster() {
 	if len(os.Args) < 3 {
 		fmt.Println("Usage: goman cluster <command>")
-		fmt.Println("Commands: create, delete, list")
+		fmt.Println("Commands: create, delete, list, status")
 		os.Exit(1)
 	}
 
@@ -166,16 +166,39 @@ func (cli *CLI) handleCluster() {
 	// Handle cluster subcommands
 	switch os.Args[2] {
 	case "create":
-		fmt.Println("Cluster creation should be done through the TUI")
-		fmt.Println("Run 'goman' to access the interactive interface")
+		handleClusterCreate(os.Args[3:])
 	case "delete":
-		fmt.Println("Cluster deletion should be done through the TUI")
-		fmt.Println("Run 'goman' to access the interactive interface")
+		handleClusterDelete(os.Args[3:])
 	case "list":
-		fmt.Println("Cluster listing should be done through the TUI")
-		fmt.Println("Run 'goman' to access the interactive interface")
+		handleClusterList(os.Args[3:])
+	case "status":
+		handleClusterStatus(os.Args[3:])
 	default:
 		fmt.Printf("Unknown cluster command: %s\n", os.Args[2])
+		os.Exit(1)
+	}
+}
+
+// handleResources handles resources subcommands
+func (cli *CLI) handleResources() {
+	if len(os.Args) < 3 {
+		fmt.Println("Usage: goman resources <command>")
+		fmt.Println("Commands: list")
+		os.Exit(1)
+	}
+
+	// Check initialization first
+	if !cli.isInitialized() {
+		fmt.Println("✗ Goman is not initialized")
+		fmt.Println("Run 'goman init' first to set up the infrastructure")
+		os.Exit(1)
+	}
+
+	switch os.Args[2] {
+	case "list":
+		handleResourcesList(os.Args[3:])
+	default:
+		fmt.Printf("Unknown resources command: %s\n", os.Args[2])
 		os.Exit(1)
 	}
 }
@@ -260,10 +283,10 @@ func saveInitStatus(result *setup.InitializeResult) error {
 	}
 
 	status := InitStatus{
-		S3Bucket:  result.S3BucketCreated,
-		Lambda:    result.LambdaDeployed,
-		DynamoDB:  result.DynamoDBCreated,
-		IAMRoles:  result.SSMProfileCreated,
+		S3Bucket:  result.StorageReady,
+		Lambda:    result.FunctionReady,
+		DynamoDB:  result.LockServiceReady,
+		IAMRoles:  result.AuthReady,
 		Timestamp: fmt.Sprintf("%v", result),
 	}
 
@@ -276,164 +299,10 @@ func saveInitStatus(result *setup.InitializeResult) error {
 	return os.WriteFile(initFile, data, 0644)
 }
 
-// cleanupInfrastructure removes all AWS resources
+// cleanupInfrastructure removes all provider-specific infrastructure
 func (cli *CLI) cleanupInfrastructure(ctx context.Context) error {
-	// Get AWS provider to access resource names
-	provider, err := registry.GetDefaultProvider()
-	if err != nil {
-		return fmt.Errorf("failed to get provider: %w", err)
-	}
-
-	awsProvider, ok := provider.(*aws.AWSProvider)
-	if !ok {
-		return fmt.Errorf("provider is not AWS")
-	}
-
-	accountID := awsProvider.AccountID()
-	region := awsProvider.Region()
-
-	// Resource names
-	bucketName := fmt.Sprintf("goman-%s", accountID)
-	functionName := "goman-cluster-controller"
-	tableName := "goman-resource-locks"
-	lambdaRoleName := fmt.Sprintf("goman-lambda-role-%s", accountID)
-	lambdaPolicyName := fmt.Sprintf("goman-lambda-policy-%s", accountID)
-	ssmRoleName := "goman-ssm-instance-role"
-	ssmProfileName := "goman-ssm-instance-profile"
-
-	// Create AWS clients
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		return err
-	}
-
-	s3Client := s3.NewFromConfig(cfg)
-	lambdaClient := lambda.NewFromConfig(cfg)
-	dynamoClient := dynamodb.NewFromConfig(cfg)
-	iamClient := iam.NewFromConfig(cfg)
-
-	var errors []string
-
-	// 1. Delete EventBridge rule and Lambda function
-	fmt.Println("  • Deleting EventBridge rules...")
-	eventClient := eventbridge.NewFromConfig(cfg)
-	ruleName := "goman-ec2-state-change-rule"
-
-	// Remove targets first
-	eventClient.RemoveTargets(ctx, &eventbridge.RemoveTargetsInput{
-		Rule: awssdk.String(ruleName),
-		Ids:  []string{"1"},
-	})
-
-	// Delete the rule
-	eventClient.DeleteRule(ctx, &eventbridge.DeleteRuleInput{
-		Name: awssdk.String(ruleName),
-	})
-
-	fmt.Println("  • Deleting Lambda function...")
-	_, err = lambdaClient.DeleteFunction(ctx, &lambda.DeleteFunctionInput{
-		FunctionName: awssdk.String(functionName),
-	})
-	if err != nil && !strings.Contains(err.Error(), "ResourceNotFoundException") {
-		errors = append(errors, fmt.Sprintf("Lambda: %v", err))
-	}
-
-	// 2. Delete S3 bucket (must be empty first)
-	fmt.Println("  • Deleting S3 bucket...")
-	// First, delete all objects
-	listOutput, err := s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: awssdk.String(bucketName),
-	})
-	if err == nil && listOutput.Contents != nil {
-		for _, obj := range listOutput.Contents {
-			s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
-				Bucket: awssdk.String(bucketName),
-				Key:    obj.Key,
-			})
-		}
-	}
-	// Then delete bucket
-	_, err = s3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
-		Bucket: awssdk.String(bucketName),
-	})
-	if err != nil && !strings.Contains(err.Error(), "NoSuchBucket") {
-		errors = append(errors, fmt.Sprintf("S3: %v", err))
-	}
-
-	// 3. Delete DynamoDB table
-	fmt.Println("  • Deleting DynamoDB table...")
-	_, err = dynamoClient.DeleteTable(ctx, &dynamodb.DeleteTableInput{
-		TableName: awssdk.String(tableName),
-	})
-	if err != nil && !strings.Contains(err.Error(), "ResourceNotFoundException") {
-		errors = append(errors, fmt.Sprintf("DynamoDB: %v", err))
-	}
-
-	// 4. Delete IAM resources
-	fmt.Println("  • Deleting IAM roles and policies...")
-
-	// Remove role from instance profile
-	iamClient.RemoveRoleFromInstanceProfile(ctx, &iam.RemoveRoleFromInstanceProfileInput{
-		InstanceProfileName: awssdk.String(ssmProfileName),
-		RoleName:            awssdk.String(ssmRoleName),
-	})
-
-	// Delete instance profile
-	iamClient.DeleteInstanceProfile(ctx, &iam.DeleteInstanceProfileInput{
-		InstanceProfileName: awssdk.String(ssmProfileName),
-	})
-
-	// Detach and delete policies
-	iamClient.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{
-		RoleName:  awssdk.String(ssmRoleName),
-		PolicyArn: awssdk.String("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"),
-	})
-	iamClient.DeleteRole(ctx, &iam.DeleteRoleInput{
-		RoleName: awssdk.String(ssmRoleName),
-	})
-
-	// Detach ALL policies from Lambda role before deletion
-	listAttached, err := iamClient.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{
-		RoleName: awssdk.String(lambdaRoleName),
-	})
-	if err == nil && listAttached.AttachedPolicies != nil {
-		for _, policy := range listAttached.AttachedPolicies {
-			iamClient.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{
-				RoleName:  awssdk.String(lambdaRoleName),
-				PolicyArn: policy.PolicyArn,
-			})
-		}
-	}
-
-	// Delete custom policy (first delete all non-default versions)
-	policyArn := fmt.Sprintf("arn:aws:iam::%s:policy/%s", accountID, lambdaPolicyName)
-	listVersionsOutput, err := iamClient.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{
-		PolicyArn: awssdk.String(policyArn),
-	})
-	if err == nil && listVersionsOutput.Versions != nil {
-		for _, version := range listVersionsOutput.Versions {
-			if !version.IsDefaultVersion {
-				iamClient.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{
-					PolicyArn: awssdk.String(policyArn),
-					VersionId: version.VersionId,
-				})
-			}
-		}
-	}
-	iamClient.DeletePolicy(ctx, &iam.DeletePolicyInput{
-		PolicyArn: awssdk.String(policyArn),
-	})
-
-	// Delete Lambda role
-	iamClient.DeleteRole(ctx, &iam.DeleteRoleInput{
-		RoleName: awssdk.String(lambdaRoleName),
-	})
-
-	if len(errors) > 0 {
-		return fmt.Errorf("some resources failed to delete: %s", strings.Join(errors, "; "))
-	}
-
-	return nil
+	// Use the provider-agnostic cleanup from setup package
+	return setup.CleanupInfrastructure(ctx)
 }
 
 // printHelp prints help information

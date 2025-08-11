@@ -3,6 +3,8 @@ package aws
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -37,7 +39,25 @@ func NewNotificationService(snsClient *sns.Client, sqsClient *sqs.Client, accoun
 
 // Initialize ensures required topics exist
 func (s *NotificationService) Initialize(ctx context.Context) error {
-	// Create default topics
+	// In Lambda environment, skip initialization as SNS topics should already exist
+	// and we might not have permissions to create them
+	if os.Getenv("LAMBDA_TASK_ROOT") != "" {
+		log.Println("Running in Lambda environment, skipping SNS topic initialization")
+		// Just populate the ARNs for known topics without checking/creating
+		topics := []string{
+			"goman-cluster-events",
+			"goman-reconcile-events",
+			"goman-error-events",
+		}
+		for _, topic := range topics {
+			// Construct the ARN directly without checking if topic exists
+			arn := fmt.Sprintf("arn:aws:sns:%s:%s:%s", s.region, s.accountID, topic)
+			s.topicArns[topic] = arn
+		}
+		return nil
+	}
+
+	// Create default topics (only in non-Lambda environment)
 	topics := []string{
 		"goman-cluster-events",
 		"goman-reconcile-events",

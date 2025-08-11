@@ -190,17 +190,17 @@ func (m initPromptModel) View() string {
 		var details string
 		if m.result != nil {
 			details = "\n"
-			if m.result.S3BucketCreated {
-				details += successStyle.Render("✓") + " S3 Bucket configured\n"
+			if m.result.StorageReady {
+				details += successStyle.Render("✓") + " Storage configured\n"
 			}
-			if m.result.LambdaDeployed {
-				details += successStyle.Render("✓") + " Lambda function deployed\n"
+			if m.result.FunctionReady {
+				details += successStyle.Render("✓") + " Function deployed\n"
 			}
-			if m.result.DynamoDBCreated {
-				details += successStyle.Render("✓") + " DynamoDB table created\n"
+			if m.result.LockServiceReady {
+				details += successStyle.Render("✓") + " Lock service created\n"
 			}
-			if m.result.SSMProfileCreated {
-				details += successStyle.Render("✓") + " IAM roles configured\n"
+			if m.result.AuthReady {
+				details += successStyle.Render("✓") + " Auth configured\n"
 			}
 
 			if len(m.result.Errors) > 0 {

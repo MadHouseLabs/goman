@@ -2,21 +2,26 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"log"
-	"os"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
+	eventbridgetypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/madhouselabs/goman/pkg/logger"
 	"github.com/madhouselabs/goman/pkg/provider"
 )
 
@@ -45,23 +50,17 @@ type AWSProvider struct {
 	iamClient    *iam.Client
 }
 
+
 // NewProvider creates a new AWS provider
 func NewProvider(profile, region string) (*AWSProvider, error) {
 	// Create a context for initialization
 	ctx := context.Background()
 
-	// Check if we're running in Lambda environment
-	isLambda := os.Getenv("AWS_LAMBDA_RUNTIME_API") != ""
-
-	if isLambda {
-		log.Printf("NewProvider called with profile='%s', region='%s'", profile, region)
-	}
+	logger.Printf("NewProvider called with profile='%s', region='%s'", profile, region)
 
 	if region == "" {
 		region = "ap-south-1" // Default to Mumbai
-		if isLambda {
-			log.Printf("Using default region: %s", region)
-		}
+		logger.Printf("Using default region: %s", region)
 	}
 
 	// Load AWS config
@@ -70,43 +69,29 @@ func NewProvider(profile, region string) (*AWSProvider, error) {
 
 	// Only add profile if it's not empty (for Lambda environment)
 	if profile != "" {
-		if isLambda {
-			log.Printf("Adding profile to config: %s", profile)
-		}
+		logger.Printf("Adding profile to config: %s", profile)
 		cfgOptions = append(cfgOptions, config.WithSharedConfigProfile(profile))
-	} else if isLambda {
-		log.Println("No profile specified, using default credentials chain")
+	} else {
+		logger.Println("No profile specified, using default credentials chain")
 	}
 
-	if isLambda {
-		log.Println("Loading AWS config...")
-	}
+	logger.Println("Loading AWS config...")
 	cfg, err := config.LoadDefaultConfig(ctx, cfgOptions...)
 	if err != nil {
-		if isLambda {
-			log.Printf("Failed to load AWS config: %v", err)
-		}
+		logger.Printf("Failed to load AWS config: %v", err)
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
-	if isLambda {
-		log.Println("AWS config loaded successfully")
-	}
+	logger.Println("AWS config loaded successfully")
 
 	// Get account ID
-	if isLambda {
-		log.Println("Getting AWS account ID...")
-	}
+	logger.Println("Getting AWS account ID...")
 	stsClient := sts.NewFromConfig(cfg)
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
-		if isLambda {
-			log.Printf("Failed to get AWS account ID: %v", err)
-		}
+		logger.Printf("Failed to get AWS account ID: %v", err)
 		return nil, fmt.Errorf("failed to get AWS account ID: %w", err)
 	}
-	if isLambda {
-		log.Printf("AWS account ID: %s", *identity.Account)
-	}
+	logger.Printf("AWS account ID: %s", *identity.Account)
 
 	p := &AWSProvider{
 		profile:      profile,
@@ -195,7 +180,7 @@ func (p *AWSProvider) GetConfig() aws.Config {
 
 // CleanupClusterResources implements the ClusterCleaner interface
 func (p *AWSProvider) CleanupClusterResources(ctx context.Context, clusterName string) error {
-	log.Printf("Cleaning up AWS resources for cluster %s", clusterName)
+	logger.Printf("Cleaning up AWS resources for cluster %s", clusterName)
 
 	// Check if there are any instances still running
 	instances, err := p.computeService.ListInstances(ctx, map[string]string{
@@ -204,42 +189,48 @@ func (p *AWSProvider) CleanupClusterResources(ctx context.Context, clusterName s
 	})
 
 	if err == nil && len(instances) > 0 {
-		log.Printf("Cannot cleanup: %d instances still exist for cluster %s", len(instances), clusterName)
+		logger.Printf("Cannot cleanup: %d instances still exist for cluster %s", len(instances), clusterName)
 		return fmt.Errorf("cannot cleanup: instances still exist")
 	}
 
-	// Clean up cluster-specific security group
-	sgName := fmt.Sprintf("goman-%s-sg", clusterName)
-	describeSGOutput, err := p.ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
-		Filters: []types.Filter{
-			{
-				Name:   aws.String("group-name"),
-				Values: []string{sgName},
+	// Clean up cluster-specific security groups
+	// Look for all possible patterns: goman-{cluster}-sg, goman-{cluster}-*-sg
+	patterns := []string{
+		fmt.Sprintf("goman-%s-sg", clusterName),
+		fmt.Sprintf("goman-%s-*", clusterName), // Catch any variations
+	}
+	
+	for _, pattern := range patterns {
+		describeSGOutput, err := p.ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+			Filters: []types.Filter{
+				{
+					Name:   aws.String("group-name"),
+					Values: []string{pattern},
+				},
 			},
-		},
-	})
-
-	if err == nil && len(describeSGOutput.SecurityGroups) > 0 {
-		sgID := describeSGOutput.SecurityGroups[0].GroupId
-
-		// Try to delete the security group
-		_, err = p.ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{
-			GroupId: sgID,
 		})
-		if err != nil {
-			// Security group might still be in use, which is fine
-			log.Printf("Note: Security group %s not deleted (may be in use): %v", sgName, err)
-		} else {
-			log.Printf("Deleted security group %s", sgName)
+
+		if err == nil && len(describeSGOutput.SecurityGroups) > 0 {
+			for _, sg := range describeSGOutput.SecurityGroups {
+				sgName := aws.ToString(sg.GroupName)
+				sgID := sg.GroupId
+
+				// Try to delete the security group
+				_, err = p.ec2Client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{
+					GroupId: sgID,
+				})
+				if err != nil {
+					// Security group might still be in use, which is fine
+					logger.Printf("Note: Security group %s not deleted (may be in use): %v", sgName, err)
+				} else {
+					logger.Printf("Deleted security group %s", sgName)
+				}
+			}
 		}
 	}
 
-	// Note: We intentionally DO NOT delete:
-	// - VPC (using default VPC)
-	// - Subnets (using default subnets)
-	// - IAM roles/instance profiles (can be reused)
 
-	log.Printf("Cluster %s cleanup complete (preserving reusable resources)", clusterName)
+	logger.Printf("Cluster %s cleanup complete (preserving reusable resources)", clusterName)
 	return nil
 }
 
@@ -267,6 +258,15 @@ func (p *AWSProvider) Initialize(ctx context.Context) (*provider.InitializeResul
 		result.Resources["dynamodb_table"] = "goman-resource-locks"
 	}
 
+	// Initialize compute service (SSM instance profile)
+	if computeService, ok := p.computeService.(*ComputeService); ok {
+		if err := computeService.Initialize(ctx); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("Compute service: %v", err))
+		} else {
+			result.Resources["iam_role_ssm"] = "goman-ssm-instance-role"
+		}
+	}
+
 	// Deploy function (Lambda)
 	functionName := fmt.Sprintf("goman-controller-%s", p.accountID)
 	packagePath := "build/lambda-aws-controller.zip"
@@ -275,22 +275,171 @@ func (p *AWSProvider) Initialize(ctx context.Context) (*provider.InitializeResul
 	} else {
 		result.FunctionReady = true
 		result.Resources["lambda_function"] = functionName
+		
+		// Wait for Lambda to be fully ready before setting up notifications
+		// This avoids conflicts when Lambda is updating
+		if err := p.waitForLambdaReady(ctx, functionName); err != nil {
+			logger.Printf("Warning: Lambda may not be fully ready: %v", err)
+		}
+		
+		// Set up S3 notifications for Lambda with retry
+		retryCount := 3
+		var lastErr error
+		for i := 0; i < retryCount; i++ {
+			if err := p.setupS3Notifications(ctx, functionName); err != nil {
+				lastErr = err
+				logger.Printf("Attempt %d: Failed to setup S3 notifications: %v", i+1, err)
+				if i < retryCount-1 {
+					time.Sleep(time.Duration(5*(i+1)) * time.Second) // Exponential backoff
+				}
+			} else {
+				lastErr = nil
+				break
+			}
+		}
+		if lastErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("S3 notifications: %v", lastErr))
+		}
+		
+		// Set up EventBridge rule for EC2 state changes
+		if err := p.setupEventBridgeRule(ctx, functionName); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("EventBridge rule: %v", err))
+		}
 	}
 
 	// Auth is handled by IAM roles created during service initialization
 	result.AuthReady = true
 	result.Resources["iam_role_lambda"] = fmt.Sprintf("goman-lambda-role-%s", p.accountID)
-	result.Resources["iam_role_ssm"] = "goman-ssm-instance-role"
 
 	return result, nil
 }
 
 // Cleanup removes AWS infrastructure
 func (p *AWSProvider) Cleanup(ctx context.Context) error {
-	// This would remove all AWS resources
-	// Implementation would be similar to the CLI cleanup code
-	// but using the provider's services
-	return fmt.Errorf("cleanup not yet implemented for AWS provider")
+	var errors []string
+	
+	bucketName := fmt.Sprintf("goman-%s", p.accountID)
+	functionName := fmt.Sprintf("goman-controller-%s", p.accountID)
+	tableName := "goman-resource-locks"
+	lambdaRoleName := fmt.Sprintf("goman-lambda-role-%s", p.accountID)
+	lambdaPolicyName := fmt.Sprintf("goman-lambda-policy-%s", p.accountID)
+	ssmRoleName := "goman-ssm-instance-role"
+	ssmProfileName := "goman-ssm-instance-profile"
+	
+	eventClient := eventbridge.NewFromConfig(p.cfg)
+	ruleName := "goman-ec2-state-change-rule"
+	
+	eventClient.RemoveTargets(ctx, &eventbridge.RemoveTargetsInput{
+		Rule: aws.String(ruleName),
+		Ids:  []string{"1"},
+	})
+	
+	eventClient.DeleteRule(ctx, &eventbridge.DeleteRuleInput{
+		Name: aws.String(ruleName),
+	})
+	
+	if err := p.functionService.DeleteFunction(ctx, functionName); err != nil {
+		if !strings.Contains(err.Error(), "ResourceNotFoundException") {
+			errors = append(errors, fmt.Sprintf("Lambda: %v", err))
+		}
+	}
+	
+	snsTopics := []string{
+		"goman-cluster-events",
+		"goman-reconcile-events",
+		"goman-error-events",
+	}
+	for _, topicName := range snsTopics {
+		topicArn := fmt.Sprintf("arn:aws:sns:%s:%s:%s", p.region, p.accountID, topicName)
+		_, err := p.snsClient.DeleteTopic(ctx, &sns.DeleteTopicInput{
+			TopicArn: aws.String(topicArn),
+		})
+		if err != nil && !strings.Contains(err.Error(), "NotFound") {
+			errors = append(errors, fmt.Sprintf("SNS topic %s: %v", topicName, err))
+		}
+	}
+	
+	listOutput, err := p.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucketName),
+	})
+	if err == nil && listOutput.Contents != nil {
+		for _, obj := range listOutput.Contents {
+			p.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    obj.Key,
+			})
+		}
+	}
+	_, err = p.s3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err != nil && !strings.Contains(err.Error(), "NoSuchBucket") {
+		errors = append(errors, fmt.Sprintf("S3: %v", err))
+	}
+	
+	_, err = p.dynamoClient.DeleteTable(ctx, &dynamodb.DeleteTableInput{
+		TableName: aws.String(tableName),
+	})
+	if err != nil && !strings.Contains(err.Error(), "ResourceNotFoundException") {
+		errors = append(errors, fmt.Sprintf("DynamoDB: %v", err))
+	}
+	
+	p.iamClient.RemoveRoleFromInstanceProfile(ctx, &iam.RemoveRoleFromInstanceProfileInput{
+		InstanceProfileName: aws.String(ssmProfileName),
+		RoleName:            aws.String(ssmRoleName),
+	})
+	
+	p.iamClient.DeleteInstanceProfile(ctx, &iam.DeleteInstanceProfileInput{
+		InstanceProfileName: aws.String(ssmProfileName),
+	})
+	
+	p.iamClient.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{
+		RoleName:  aws.String(ssmRoleName),
+		PolicyArn: aws.String("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"),
+	})
+	p.iamClient.DeleteRole(ctx, &iam.DeleteRoleInput{
+		RoleName: aws.String(ssmRoleName),
+	})
+	
+	listAttached, err := p.iamClient.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{
+		RoleName: aws.String(lambdaRoleName),
+	})
+	if err == nil && listAttached.AttachedPolicies != nil {
+		for _, policy := range listAttached.AttachedPolicies {
+			p.iamClient.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{
+				RoleName:  aws.String(lambdaRoleName),
+				PolicyArn: policy.PolicyArn,
+			})
+		}
+	}
+	
+	policyArn := fmt.Sprintf("arn:aws:iam::%s:policy/%s", p.accountID, lambdaPolicyName)
+	listVersionsOutput, err := p.iamClient.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{
+		PolicyArn: aws.String(policyArn),
+	})
+	if err == nil && listVersionsOutput.Versions != nil {
+		for _, version := range listVersionsOutput.Versions {
+			if !version.IsDefaultVersion {
+				p.iamClient.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{
+					PolicyArn: aws.String(policyArn),
+					VersionId: version.VersionId,
+				})
+			}
+		}
+	}
+	p.iamClient.DeletePolicy(ctx, &iam.DeletePolicyInput{
+		PolicyArn: aws.String(policyArn),
+	})
+	
+	p.iamClient.DeleteRole(ctx, &iam.DeleteRoleInput{
+		RoleName: aws.String(lambdaRoleName),
+	})
+	
+	if len(errors) > 0 {
+		return fmt.Errorf("some resources failed to delete: %s", strings.Join(errors, "; "))
+	}
+	
+	return nil
 }
 
 // GetStatus checks the status of AWS infrastructure
@@ -299,18 +448,12 @@ func (p *AWSProvider) GetStatus(ctx context.Context) (*provider.InfrastructureSt
 		Resources: make(map[string]string),
 	}
 
-	// Check S3 bucket
 	bucketName := fmt.Sprintf("goman-%s", p.accountID)
 	status.Resources["s3_bucket"] = bucketName
-	// Would check if bucket exists
 	status.StorageStatus = "ready"
 
-	// Check DynamoDB table
 	status.Resources["dynamodb_table"] = "goman-resource-locks"
-	// Would check if table exists
 	status.LockStatus = "ready"
-
-	// Check Lambda function
 	functionName := fmt.Sprintf("goman-controller-%s", p.accountID)
 	status.Resources["lambda_function"] = functionName
 	exists, _ := p.functionService.FunctionExists(ctx, functionName)
@@ -331,4 +474,178 @@ func (p *AWSProvider) GetStatus(ctx context.Context) (*provider.InfrastructureSt
 		status.LockStatus == "ready"
 
 	return status, nil
+}
+
+// waitForLambdaReady waits for Lambda function to be in Active state
+func (p *AWSProvider) waitForLambdaReady(ctx context.Context, functionName string) error {
+	maxRetries := 30
+	for i := 0; i < maxRetries; i++ {
+		config, err := p.lambdaClient.GetFunctionConfiguration(ctx, &lambda.GetFunctionConfigurationInput{
+			FunctionName: aws.String(functionName),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to get function configuration: %w", err)
+		}
+		
+		if config.State == "Active" && config.LastUpdateStatus == "Successful" {
+			return nil
+		}
+		
+		if config.State == "Failed" || config.LastUpdateStatus == "Failed" {
+			return fmt.Errorf("function is in failed state")
+		}
+		
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("timeout waiting for Lambda to be ready")
+}
+
+// setupS3Notifications configures S3 bucket notifications to trigger Lambda
+func (p *AWSProvider) setupS3Notifications(ctx context.Context, functionName string) error {
+	bucketName := fmt.Sprintf("goman-%s", p.accountID)
+	
+	// First check if notifications are already configured
+	existingConfig, err := p.s3Client.GetBucketNotificationConfiguration(ctx, &s3.GetBucketNotificationConfigurationInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err == nil && existingConfig != nil {
+		// Check if our notification already exists
+		for _, config := range existingConfig.LambdaFunctionConfigurations {
+			if config.Id != nil && *config.Id == "goman-cluster-changes" {
+				logger.Printf("S3 notifications already configured for bucket %s", bucketName)
+				return nil
+			}
+		}
+	}
+	
+	// Add permission for S3 to invoke the Lambda function
+	_, err = p.lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
+		FunctionName: aws.String(functionName),
+		StatementId:  aws.String("s3-invoke-permission"),
+		Action:       aws.String("lambda:InvokeFunction"),
+		Principal:    aws.String("s3.amazonaws.com"),
+		SourceArn:    aws.String(fmt.Sprintf("arn:aws:s3:::%s", bucketName)),
+	})
+	
+	if err != nil {
+		if !strings.Contains(err.Error(), "ResourceConflictException") {
+			return fmt.Errorf("failed to add S3 invoke permission: %w", err)
+		}
+		// Permission already exists, which is fine
+	}
+	
+	// Get function ARN
+	functionConfig, err := p.lambdaClient.GetFunction(ctx, &lambda.GetFunctionInput{
+		FunctionName: aws.String(functionName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get function configuration: %w", err)
+	}
+	
+	// Configure S3 bucket notification for both old and new formats
+	notificationConfig := &s3.PutBucketNotificationConfigurationInput{
+		Bucket: aws.String(bucketName),
+		NotificationConfiguration: &s3types.NotificationConfiguration{
+			LambdaFunctionConfigurations: []s3types.LambdaFunctionConfiguration{
+				{
+					Id:                aws.String("goman-cluster-changes"),
+					LambdaFunctionArn: functionConfig.Configuration.FunctionArn,
+					Events: []s3types.Event{
+						s3types.EventS3ObjectCreatedPut,
+						s3types.EventS3ObjectCreatedPost,
+						s3types.EventS3ObjectRemovedDelete,
+					},
+					Filter: &s3types.NotificationConfigurationFilter{
+						Key: &s3types.S3KeyFilter{
+							FilterRules: []s3types.FilterRule{
+								{
+									Name:  s3types.FilterRuleNamePrefix,
+									Value: aws.String("clusters/"),
+								},
+								{
+									Name:  s3types.FilterRuleNameSuffix,
+									Value: aws.String(".json"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	
+	_, err = p.s3Client.PutBucketNotificationConfiguration(ctx, notificationConfig)
+	if err != nil {
+		return fmt.Errorf("failed to set up S3 bucket notification: %w", err)
+	}
+	
+	return nil
+}
+
+// setupEventBridgeRule creates an EventBridge rule to trigger Lambda on EC2 instance state changes
+func (p *AWSProvider) setupEventBridgeRule(ctx context.Context, functionName string) error {
+	// Create EventBridge client
+	eventClient := eventbridge.NewFromConfig(p.cfg)
+	
+	// Define the rule name
+	ruleName := "goman-ec2-state-change-rule"
+	
+	// Create event pattern for ALL EC2 instance state changes
+	eventPattern := map[string]interface{}{
+		"source":      []string{"aws.ec2"},
+		"detail-type": []string{"EC2 Instance State-change Notification"},
+		// No state filter - we want ALL state changes
+	}
+	
+	eventPatternJSON, err := json.Marshal(eventPattern)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event pattern: %w", err)
+	}
+	
+	// Create or update the rule
+	_, err = eventClient.PutRule(ctx, &eventbridge.PutRuleInput{
+		Name:         aws.String(ruleName),
+		Description:  aws.String("Trigger Lambda on any EC2 instance state change for Goman cluster reconciliation"),
+		EventPattern: aws.String(string(eventPatternJSON)),
+		State:        eventbridgetypes.RuleStateEnabled,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create EventBridge rule: %w", err)
+	}
+	
+	// Get Lambda function ARN
+	functionConfig, err := p.lambdaClient.GetFunction(ctx, &lambda.GetFunctionInput{
+		FunctionName: aws.String(functionName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get Lambda function: %w", err)
+	}
+	
+	// Add Lambda permission for EventBridge to invoke the function
+	_, err = p.lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
+		FunctionName: aws.String(functionName),
+		StatementId:  aws.String("eventbridge-ec2-invoke"),
+		Action:       aws.String("lambda:InvokeFunction"),
+		Principal:    aws.String("events.amazonaws.com"),
+		SourceArn:    aws.String(fmt.Sprintf("arn:aws:events:%s:%s:rule/%s", p.region, p.accountID, ruleName)),
+	})
+	if err != nil && !strings.Contains(err.Error(), "ResourceConflictException") {
+		return fmt.Errorf("failed to add Lambda permission for EventBridge: %w", err)
+	}
+	
+	// Add Lambda as target for the rule
+	_, err = eventClient.PutTargets(ctx, &eventbridge.PutTargetsInput{
+		Rule: aws.String(ruleName),
+		Targets: []eventbridgetypes.Target{
+			{
+				Id:  aws.String("1"),
+				Arn: functionConfig.Configuration.FunctionArn,
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to add Lambda target to EventBridge rule: %w", err)
+	}
+	
+	return nil
 }

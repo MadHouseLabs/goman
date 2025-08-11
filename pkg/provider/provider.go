@@ -135,13 +135,14 @@ type Lock struct {
 
 // InitializeResult represents the result of infrastructure initialization
 type InitializeResult struct {
-	StorageReady     bool              // Storage service initialized
-	FunctionReady    bool              // Function service deployed
-	LockServiceReady bool              // Lock service initialized
-	AuthReady        bool              // Authentication/authorization configured
-	ProviderType     string            // Provider type (aws, gcp, azure)
-	Resources        map[string]string // Provider-specific resource identifiers
-	Errors           []string          // Any errors during initialization
+	StorageReady       bool              // Storage service initialized
+	FunctionReady      bool              // Function service deployed
+	LockServiceReady   bool              // Lock service initialized
+	NotificationsReady bool              // Notification service configured
+	AuthReady          bool              // Authentication/authorization configured
+	ProviderType       string            // Provider type (aws, gcp, azure)
+	Resources          map[string]string // Provider-specific resource identifiers
+	Errors             []string          // Any errors during initialization
 }
 
 // InfrastructureStatus represents the current infrastructure status

@@ -44,11 +44,8 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 	// Initialize provider services
 	ctx := context.Background()
 
-	// The lock service table should already exist (created during setup)
-	// Initialize will check if table exists and return early without trying to create it
 	if err := prov.GetLockService().Initialize(ctx); err != nil {
-		// Log the error but continue - the table should exist
-		log.Printf("Warning: Lock service initialization had an issue (table should exist): %v", err)
+		log.Printf("Warning: Lock service initialization error: %v", err)
 	}
 
 	// Initialize storage service
@@ -56,15 +53,10 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 		return nil, fmt.Errorf("failed to initialize storage service: %w", err)
 	}
 
-	// Initialize notification service
 	if err := prov.GetNotificationService().Initialize(ctx); err != nil {
-		log.Printf("Warning: failed to initialize notification service: %v", err)
+		log.Printf("Warning: Notification service initialization error: %v", err)
 	}
 
-	// Note: Compute service initialization (SSM instance profile creation) is done
-	// during local setup, not in Lambda, as Lambda shouldn't have IAM create permissions
-
-	// Generate unique owner ID for this Lambda instance
 	owner := fmt.Sprintf("lambda-%s-%d", prov.Region(), time.Now().UnixNano())
 
 	// Create reconciler
@@ -73,7 +65,6 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 		return nil, fmt.Errorf("failed to create reconciler: %w", err)
 	}
 
-	// Create storage for accessing cluster states
 	stor, err := storage.NewStorage()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
@@ -90,21 +81,15 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage) (*models.ReconcileResult, error) {
 	log.Printf("Received event: %s", string(event))
 
-	// Try to parse as direct event first
 	var lambdaEvent LambdaEvent
 	if err := json.Unmarshal(event, &lambdaEvent); err == nil && lambdaEvent.ClusterName != "" {
-		// Direct invocation with cluster name
 		return h.reconciler.ReconcileCluster(ctx, lambdaEvent.ClusterName)
 	}
 
-	// Try to parse as S3 event
 	var s3Event S3Event
 	if err := json.Unmarshal(event, &s3Event); err == nil && len(s3Event.Records) > 0 {
-		// S3 event trigger
 		for _, record := range s3Event.Records {
 			if record.S3.Object.Key != "" {
-				// Extract cluster name from S3 key
-				// Expected format: clusters/{cluster-name}.json
 				clusterName := extractClusterName(record.S3.Object.Key)
 				if clusterName != "" {
 					log.Printf("Processing S3 event for cluster: %s", clusterName)
@@ -114,17 +99,14 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 		}
 	}
 
-	// Try to parse as EventBridge EC2 event
 	var ec2Event EC2StateChangeEvent
 	if err := json.Unmarshal(event, &ec2Event); err == nil && ec2Event.DetailType == "EC2 Instance State-change Notification" {
-		// EC2 instance state change event
 		instanceID := ec2Event.Detail.InstanceID
 		state := ec2Event.Detail.State
 		region := ec2Event.Region
 
 		log.Printf("Processing EC2 state change event: instance %s in region %s changed to %s", instanceID, region, state)
 
-		// Get the cluster owner from instance tags
 		clusterName, err := h.getClusterFromInstanceTags(ctx, instanceID, region)
 		if err != nil {
 			log.Printf("Failed to get cluster from instance tags: %v", err)
@@ -173,13 +155,17 @@ type S3EventRecord struct {
 
 // extractClusterName extracts cluster name from S3 object key
 func extractClusterName(key string) string {
-	// Handle the standard format: clusters/{cluster-name}.json
-	// Example: clusters/k3s-cluster.json -> k3s-cluster
-	if strings.HasPrefix(key, "clusters/") && strings.HasSuffix(key, ".json") {
-		start := len("clusters/")
-		end := len(key) - len(".json")
-		if start < end {
-			return key[start:end]
+	// Only handle new format: clusters/{cluster-name}/config.json or clusters/{cluster-name}/status.json
+	
+	if strings.HasPrefix(key, "clusters/") {
+		path := key[len("clusters/"):]
+		
+		// Check for new format: {cluster-name}/config.json or {cluster-name}/status.json
+		if strings.Contains(path, "/") {
+			parts := strings.Split(path, "/")
+			if len(parts) == 2 && (parts[1] == "config.json" || parts[1] == "status.json") {
+				return parts[0]
+			}
 		}
 	}
 
@@ -188,11 +174,9 @@ func extractClusterName(key string) string {
 
 // getClusterFromInstanceTags queries EC2 to get the Cluster tag value from an instance
 func (h *LambdaHandler) getClusterFromInstanceTags(ctx context.Context, instanceID, region string) (string, error) {
-	// Get EC2 client for the specific region
 	computeService := h.provider.GetComputeService().(*ComputeService)
 	ec2Client := computeService.getEC2Client(region)
 
-	// Describe the instance to get its tags
 	result, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceID},
 	})
@@ -200,21 +184,18 @@ func (h *LambdaHandler) getClusterFromInstanceTags(ctx context.Context, instance
 		return "", fmt.Errorf("failed to describe instance %s in region %s: %w", instanceID, region, err)
 	}
 
-	// Check if we found the instance
 	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
 		return "", fmt.Errorf("instance %s not found in region %s", instanceID, region)
 	}
 
 	instance := result.Reservations[0].Instances[0]
 
-	// Look for the Cluster tag
 	for _, tag := range instance.Tags {
 		if tag.Key != nil && *tag.Key == "Cluster" && tag.Value != nil {
 			return *tag.Value, nil
 		}
 	}
 
-	// No Cluster tag found
 	return "", nil
 }
 
@@ -222,13 +203,6 @@ func (h *LambdaHandler) getClusterFromInstanceTags(ctx context.Context, instance
 func StartLambdaHandler() {
 	log.Println("Starting Lambda handler...")
 
-	// Add panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("PANIC in StartLambdaHandler: %v", r)
-			panic(r)
-		}
-	}()
 
 	handler, err := NewLambdaHandler()
 	if err != nil {

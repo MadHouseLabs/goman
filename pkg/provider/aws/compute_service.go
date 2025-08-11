@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamTypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/madhouselabs/goman/pkg/logger"
 	"github.com/madhouselabs/goman/pkg/provider"
 	"github.com/madhouselabs/goman/pkg/utils"
 )
@@ -53,18 +53,18 @@ func (s *ComputeService) Initialize(ctx context.Context) error {
 func (s *ComputeService) getEC2Client(region string) *ec2.Client {
 	// If no region specified, use default client
 	if region == "" {
-		log.Printf("Warning: No region specified, using default client for region: %s", s.config.Region)
+		logger.Printf("Warning: No region specified, using default client for region: %s", s.config.Region)
 		return s.client
 	}
 
 	// Check cache first
 	if client, exists := s.regionClients[region]; exists {
-		log.Printf("Using cached EC2 client for region: %s", region)
+		logger.Printf("Using cached EC2 client for region: %s", region)
 		return client
 	}
 
 	// Create new client for the region
-	log.Printf("Creating new EC2 client for region: %s", region)
+	logger.Printf("Creating new EC2 client for region: %s", region)
 	cfg := s.config.Copy()
 	cfg.Region = region
 	client := ec2.NewFromConfig(cfg)
@@ -172,7 +172,7 @@ func (s *ComputeService) getLatestUbuntuAMI(ctx context.Context, region string) 
 	})
 
 	if err != nil {
-		log.Printf("Failed to get Ubuntu AMI from SSM for region %s: %v", region, err)
+		logger.Printf("Failed to get Ubuntu AMI from SSM for region %s: %v", region, err)
 		// Fallback to Amazon Linux 2023 if Ubuntu parameter doesn't exist
 		parameterName = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 		result, err = ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
@@ -184,14 +184,14 @@ func (s *ComputeService) getLatestUbuntuAMI(ctx context.Context, region string) 
 	}
 
 	amiID := aws.ToString(result.Parameter.Value)
-	log.Printf("Using AMI %s for region %s", amiID, region)
+	logger.Printf("Using AMI %s for region %s", amiID, region)
 	return amiID, nil
 }
 
 // CreateInstance creates a new EC2 instance with retry logic
 func (s *ComputeService) CreateInstance(ctx context.Context, config provider.InstanceConfig) (*provider.Instance, error) {
 	// Log the target region for debugging
-	log.Printf("Creating instance %s in region: %s", config.Name, config.Region)
+	logger.Printf("Creating instance %s in region: %s", config.Name, config.Region)
 
 	// Get region-specific EC2 client
 	ec2Client := s.getEC2Client(config.Region)
@@ -304,7 +304,7 @@ func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) 
 		})
 		if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
 			ec2Client = client
-			log.Printf("Found instance %s in region %s", instanceID, region)
+			logger.Printf("Found instance %s in region %s", instanceID, region)
 			break
 		}
 	}
@@ -316,7 +316,7 @@ func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) 
 			InstanceIds: []string{instanceID},
 		})
 		if err != nil || len(result.Reservations) == 0 {
-			log.Printf("Warning: Instance %s not found in any known region, attempting deletion with default client", instanceID)
+			logger.Printf("Warning: Instance %s not found in any known region, attempting deletion with default client", instanceID)
 		}
 	}
 
@@ -328,7 +328,7 @@ func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) 
 		},
 	})
 	if err != nil {
-		log.Printf("Warning: Failed to disable deletion protection for %s: %v", instanceID, err)
+		logger.Printf("Warning: Failed to disable deletion protection for %s: %v", instanceID, err)
 		// Continue anyway - the instance might not have protection enabled
 	}
 
@@ -395,12 +395,12 @@ func (s *ComputeService) ListInstances(ctx context.Context, filters map[string]s
 	var ec2Client *ec2.Client
 	if region != "" {
 		ec2Client = s.getEC2Client(region)
-		log.Printf("Listing instances in specific region: %s", region)
+		logger.Printf("Listing instances in specific region: %s", region)
 	} else {
 		// If no region specified, we should check all regions where we have instances
 		// For now, use default client but log a warning
 		ec2Client = s.client
-		log.Printf("Warning: ListInstances using default region. May miss instances in other regions.")
+		logger.Printf("Warning: ListInstances using default region. May miss instances in other regions.")
 	}
 
 	// Convert filters to EC2 format
@@ -513,7 +513,7 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 	// Use the default VPC and subnets for simplicity
 	// These resources are reused across all clusters
 
-	log.Printf("Ensuring network infrastructure for %s in region: %s", resourceName, region)
+	logger.Printf("Ensuring network infrastructure for %s in region: %s", resourceName, region)
 
 	// Get region-specific EC2 client
 	ec2Client := s.getEC2Client(region)
@@ -560,9 +560,14 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 
 	subnetID := aws.ToString(describeSubnetsOutput.Subnets[0].SubnetId)
 
-	// Extract cluster name from resource name (format: cluster-name-node-0)
+	// Extract cluster name from resource name 
+	// Formats: {cluster}-master-{index} or {cluster}-worker-{index}
 	clusterName := resourceName
-	if idx := len(resourceName) - 7; idx > 0 && resourceName[idx:idx+5] == "-node" {
+	
+	// Try to extract cluster name by looking for -master- or -worker-
+	if idx := strings.LastIndex(resourceName, "-master-"); idx > 0 {
+		clusterName = resourceName[:idx]
+	} else if idx := strings.LastIndex(resourceName, "-worker-"); idx > 0 {
 		clusterName = resourceName[:idx]
 	}
 
@@ -586,7 +591,7 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 	var securityGroupID string
 	if err != nil || len(describeSGOutput.SecurityGroups) == 0 {
 		// Create security group (will be reused if cluster is recreated)
-		log.Printf("Creating new security group %s for cluster %s", sgName, clusterName)
+		logger.Printf("Creating new security group %s for cluster %s", sgName, clusterName)
 		createSGOutput, err := ec2Client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
 			GroupName:   aws.String(sgName),
 			Description: aws.String(fmt.Sprintf("Security group for goman cluster %s (reusable)", clusterName)),
@@ -661,12 +666,12 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 			},
 		})
 		if err != nil {
-			log.Printf("Warning: failed to add ingress rules: %v", err)
+			logger.Printf("Warning: failed to add ingress rules: %v", err)
 		}
 	} else {
 		// Reuse existing security group
 		securityGroupID = aws.ToString(describeSGOutput.SecurityGroups[0].GroupId)
-		log.Printf("Reusing existing security group %s (ID: %s)", sgName, securityGroupID)
+		logger.Printf("Reusing existing security group %s (ID: %s)", sgName, securityGroupID)
 	}
 
 	return &NetworkInfo{

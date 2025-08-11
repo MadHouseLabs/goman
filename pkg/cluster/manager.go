@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/madhouselabs/goman/pkg/models"
-	"github.com/madhouselabs/goman/pkg/provider/registry"
 	"github.com/madhouselabs/goman/pkg/setup"
 	"github.com/madhouselabs/goman/pkg/storage"
 )
@@ -80,18 +79,13 @@ func ensureInfrastructureSetup() error {
 			return
 		}
 
-		// Check if critical components are set up
-		if !result.S3BucketCreated {
-			setupErr = fmt.Errorf("S3 bucket setup failed")
+		if !result.StorageReady {
+			setupErr = fmt.Errorf("storage setup failed")
 			return
 		}
 
-		if !result.LambdaDeployed && len(result.Errors) > 0 {
-			// Lambda deployment failed, but we can continue
-			// The clusters will be created but won't be reconciled
-			// Log the errors but don't fail
+		if !result.FunctionReady && len(result.Errors) > 0 {
 			for _, errMsg := range result.Errors {
-				// Silently log errors (in production, use proper logging)
 				_ = errMsg
 			}
 		}
@@ -141,26 +135,18 @@ func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 	cluster.EstimatedCost = float64(masterCost + len(cluster.WorkerNodes)*30)
 
 	// Save initial state to storage FIRST before adding to memory
+	// Use the new separated file structure
 	if m.storage != nil {
-		k3sState := &storage.K3sClusterState{
-			Cluster:     cluster,
-			InstanceIDs: make(map[string]string),
-			VolumeIDs:   make(map[string][]string),
-			Metadata:    make(map[string]interface{}),
-		}
-		k3sState.Metadata["created_at"] = time.Now()
-		k3sState.Metadata["reconcile_needed"] = true
-
-		// Save state - this will trigger Lambda via S3 events
-		err := m.storage.SaveClusterState(k3sState)
-		if err != nil {
-			// Failed to save cluster state, return error
-			return nil, fmt.Errorf("failed to save cluster state: %w", err)
+		// Save config file (user-controlled data)
+		if err := m.saveClusterConfig(cluster); err != nil {
+			return nil, fmt.Errorf("failed to save cluster config: %w", err)
 		}
 
-		// Also manually invoke Lambda to ensure it processes the cluster
-		// This is a backup in case S3 notifications aren't working
-		go m.invokeLambdaForCluster(cluster.Name)
+		// Save initial status file (reconciler-controlled data)
+		if err := m.saveClusterStatus(cluster); err != nil {
+			return nil, fmt.Errorf("failed to save cluster status: %w", err)
+		}
+
 	}
 
 	// Add to cluster list only after successful save
@@ -186,23 +172,11 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 			m.clusters[i].Status = models.StatusDeleting
 			m.clusters[i].UpdatedAt = time.Now()
 
-			// Update state to mark as deleting
+			// Update status to mark as deleting
 			if m.storage != nil {
-				if state, err := m.storage.LoadClusterState(m.clusters[i].Name); err == nil {
-					state.Cluster.Status = models.StatusDeleting
-					state.Cluster.UpdatedAt = time.Now()
-					if state.Metadata == nil {
-						state.Metadata = make(map[string]interface{})
-					}
-					state.Metadata["deletion_requested"] = time.Now()
-					state.Metadata["reconcile_needed"] = true
-
-					// Save state - this will trigger Lambda via S3 events
-					err := m.storage.SaveClusterState(state)
-					if err != nil {
-						// Failed to save deletion state, return error
-						return fmt.Errorf("failed to save deletion state: %w", err)
-					}
+				// Only update the status file for deletion
+				if err := m.saveClusterStatus(m.clusters[i]); err != nil {
+					return fmt.Errorf("failed to save deletion status: %w", err)
 				}
 			}
 
@@ -291,31 +265,7 @@ func (m *Manager) SyncFromProvider() error {
 	return nil
 }
 
-// SyncFromAWS syncs cluster state from AWS (deprecated, use SyncFromProvider)
-func (m *Manager) SyncFromAWS(profile, region string) error {
-	return m.SyncFromProvider()
-}
 
-// invokeLambdaForCluster manually invokes the Lambda function for a cluster
-func (m *Manager) invokeLambdaForCluster(clusterName string) {
-	ctx := context.Background()
-
-	// Get the provider
-	prov, err := registry.GetDefaultProvider()
-	if err != nil {
-		// Silently continue
-		return
-	}
-
-	// Get function service
-	functionService := prov.GetFunctionService()
-
-	// Create payload
-	payload := fmt.Sprintf(`{"clusterName": "%s"}`, clusterName)
-
-	// Invoke function - best effort, ignore errors
-	_, _ = functionService.InvokeFunction(ctx, "goman-cluster-controller", []byte(payload))
-}
 
 // RefreshClusterStatus refreshes cluster status from storage
 func (m *Manager) RefreshClusterStatus() {
@@ -336,4 +286,54 @@ func (m *Manager) RefreshClusterStatus() {
 			m.clusters = append(m.clusters, state.Cluster)
 		}
 	}
+}
+
+// saveClusterConfig saves cluster configuration (user-controlled data)
+func (m *Manager) saveClusterConfig(cluster models.K3sCluster) error {
+	if m.storage == nil {
+		return nil
+	}
+
+	// Create config-only state
+	configState := &storage.K3sClusterState{
+		Cluster: cluster,
+		// Config doesn't include instance IDs or metadata
+		InstanceIDs: nil,
+		VolumeIDs:   nil,
+		Metadata:    nil,
+	}
+
+	// Save to config.json file
+	configKey := fmt.Sprintf("clusters/%s/config.json", cluster.Name)
+	return m.storage.SaveClusterStateToKey(configState, configKey)
+}
+
+// saveClusterStatus saves cluster status (reconciler-controlled data)
+func (m *Manager) saveClusterStatus(cluster models.K3sCluster) error {
+	if m.storage == nil {
+		return nil
+	}
+
+	// Create status-only state
+	statusState := &storage.K3sClusterState{
+		Cluster: models.K3sCluster{
+			Name:      cluster.Name,
+			Status:    cluster.Status,
+			UpdatedAt: time.Now(),
+		},
+		InstanceIDs: make(map[string]string),
+		VolumeIDs:   make(map[string][]string),
+		Metadata:    make(map[string]interface{}),
+	}
+
+	// Add metadata for reconciliation
+	statusState.Metadata["updated_at"] = time.Now()
+	statusState.Metadata["reconcile_needed"] = true
+	if cluster.Status == models.StatusDeleting {
+		statusState.Metadata["deletion_requested"] = time.Now()
+	}
+
+	// Save to status.json file
+	statusKey := fmt.Sprintf("clusters/%s/status.json", cluster.Name)
+	return m.storage.SaveClusterStateToKey(statusState, statusKey)
 }

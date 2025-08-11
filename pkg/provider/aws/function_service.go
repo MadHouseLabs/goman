@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/madhouselabs/goman/pkg/logger"
 )
 
 const (
@@ -105,6 +105,22 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 	}
 
 	if exists {
+		// ALWAYS ensure IAM role and policy are up to date, even for existing functions
+		// This ensures policy changes in code are applied when re-initializing
+		if s.roleArn == "" {
+			roleArn, err := s.ensureIAMRole(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to ensure IAM role: %w", err)
+			}
+			s.roleArn = roleArn
+		} else {
+			// Even if we have a cached roleArn, still update the policy
+			_, err := s.ensureIAMRole(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to update IAM role policy: %w", err)
+			}
+		}
+
 		// Update existing function
 		if len(packageData) > 50*1024*1024 {
 			// Update from S3
@@ -139,6 +155,14 @@ func (s *FunctionService) DeployFunction(ctx context.Context, name string, packa
 		})
 		if err != nil {
 			return fmt.Errorf("failed to update function configuration: %w", err)
+		}
+
+		// Ensure S3 trigger is configured for existing functions too
+		// This handles cases where notifications were lost
+		err = s.setupS3Trigger(ctx, name)
+		if err != nil {
+			logger.Printf("Warning: Failed to ensure S3 trigger: %v", err)
+			// Don't fail deployment if trigger setup fails - it can be retried
 		}
 	} else {
 		// Ensure IAM role exists
@@ -364,6 +388,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 			{
 				"Effect": "Allow",
 				"Action": []string{
+					"dynamodb:DescribeTable",
 					"dynamodb:GetItem",
 					"dynamodb:PutItem",
 					"dynamodb:DeleteItem",
@@ -396,10 +421,11 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 				"Resource": []string{
 					fmt.Sprintf("arn:aws:ec2:*:%s:instance/*", s.accountID),
 					fmt.Sprintf("arn:aws:ec2:*:%s:security-group/*", s.accountID),
+					fmt.Sprintf("arn:aws:ec2:*:%s:vpc/*", s.accountID), // Required for CreateSecurityGroup
 					fmt.Sprintf("arn:aws:ec2:*:%s:subnet/*", s.accountID),
 					fmt.Sprintf("arn:aws:ec2:*:%s:volume/*", s.accountID),
 					fmt.Sprintf("arn:aws:ec2:*:%s:network-interface/*", s.accountID),
-					fmt.Sprintf("arn:aws:ec2:*::image/*", s.accountID), // AMIs can be public
+					"arn:aws:ec2:*::image/*", // AMIs can be public (no account ID needed)
 				},
 			},
 			// IAM permissions for using instance profiles (not creating them)
@@ -439,6 +465,36 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 					"arn:aws:ssm:*::parameter/aws/service/ami-amazon-linux-latest/*",
 				},
 			},
+			// SNS permissions for notification service
+			{
+				"Effect": "Allow",
+				"Action": []string{
+					"sns:ListTopics",
+					"sns:CreateTopic",
+					"sns:Publish",
+					"sns:Subscribe",
+					"sns:Unsubscribe",
+					"sns:GetTopicAttributes",
+				},
+				"Resource": []string{
+					fmt.Sprintf("arn:aws:sns:*:%s:goman-*", s.accountID),
+				},
+			},
+			// SQS permissions for notification service subscriptions
+			{
+				"Effect": "Allow",
+				"Action": []string{
+					"sqs:CreateQueue",
+					"sqs:DeleteQueue",
+					"sqs:GetQueueAttributes",
+					"sqs:ReceiveMessage",
+					"sqs:DeleteMessage",
+					"sqs:SendMessage",
+				},
+				"Resource": []string{
+					fmt.Sprintf("arn:aws:sqs:*:%s:goman-*", s.accountID),
+				},
+			},
 		},
 	}
 
@@ -472,14 +528,14 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 							VersionId: version.VersionId,
 						})
 						if delErr != nil {
-							log.Printf("Warning: Failed to delete old policy version %s: %v", *version.VersionId, delErr)
+							logger.Printf("Warning: Failed to delete old policy version %s: %v", *version.VersionId, delErr)
 						}
 					}
 				}
 			}
 
 			// Create new policy version
-			createPolicyVersionOutput, versionErr := s.iamClient.CreatePolicyVersion(ctx, &iam.CreatePolicyVersionInput{
+			_, versionErr := s.iamClient.CreatePolicyVersion(ctx, &iam.CreatePolicyVersionInput{
 				PolicyArn:      aws.String(policyArn),
 				PolicyDocument: aws.String(string(policyJSON)),
 				SetAsDefault:   true,
@@ -489,7 +545,7 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 				return "", fmt.Errorf("failed to create new policy version: %w", versionErr)
 			}
 
-			log.Printf("Updated IAM policy %s to version %s", policyName, *createPolicyVersionOutput.PolicyVersion.VersionId)
+			// Policy updated successfully
 			policies = append(policies, policyArn)
 		} else {
 			// Some other error occurred
@@ -519,8 +575,22 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 func (s *FunctionService) setupS3Trigger(ctx context.Context, functionName string) error {
 	bucketName := fmt.Sprintf("goman-%s", s.accountID)
 
+	// First check if notifications are already configured
+	existingConfig, err := s.s3Client.GetBucketNotificationConfiguration(ctx, &s3.GetBucketNotificationConfigurationInput{
+		Bucket: aws.String(bucketName),
+	})
+	if err == nil && existingConfig != nil {
+		// Check if our notification already exists (could be either ID)
+		for _, config := range existingConfig.LambdaFunctionConfigurations {
+			if config.Id != nil && (*config.Id == "goman-state-changes" || *config.Id == "goman-cluster-changes") {
+				logger.Printf("S3 notifications already configured for function %s", functionName)
+				return nil
+			}
+		}
+	}
+
 	// Add permission for S3 to invoke the function
-	_, err := s.lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
+	_, err = s.lambdaClient.AddPermission(ctx, &lambda.AddPermissionInput{
 		FunctionName: aws.String(functionName),
 		StatementId:  aws.String("s3-invoke-permission"),
 		Action:       aws.String("lambda:InvokeFunction"),
@@ -549,11 +619,12 @@ func (s *FunctionService) setupS3Trigger(ctx context.Context, functionName strin
 		NotificationConfiguration: &s3types.NotificationConfiguration{
 			LambdaFunctionConfigurations: []s3types.LambdaFunctionConfiguration{
 				{
-					Id:                aws.String("goman-state-changes"),
+					Id:                aws.String("goman-cluster-changes"),
 					LambdaFunctionArn: functionConfig.Configuration.FunctionArn,
 					Events: []s3types.Event{
 						s3types.EventS3ObjectCreatedPut,
 						s3types.EventS3ObjectCreatedPost,
+						s3types.EventS3ObjectRemovedDelete,
 					},
 					Filter: &s3types.NotificationConfigurationFilter{
 						Key: &s3types.S3KeyFilter{
