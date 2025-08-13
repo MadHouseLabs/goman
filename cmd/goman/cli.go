@@ -212,7 +212,8 @@ func (cli *CLI) runTUI() {
 		return
 	}
 
-	// Run the normal TUI
+	// Infrastructure should already be initialized
+	// Just run the TUI directly
 	runMainTUI()
 }
 

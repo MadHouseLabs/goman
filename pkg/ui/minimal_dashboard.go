@@ -35,8 +35,8 @@ func RenderMinimalDashboard(width, height int, clusters []models.K3sCluster, sta
 	}
 
 	// Calculate layout dimensions
-	headerHeight := 4   // Minimal header
-	footerHeight := 3   // Minimal footer
+	headerHeight := 2   // Title + separator
+	footerHeight := 2   // Separator + status/nav line
 	tableHeight := height - headerHeight - footerHeight
 
 	// Build components
@@ -234,15 +234,7 @@ func createMinimalTable(clusters []models.K3sCluster, states map[string]*storage
 
 // renderMinimalFooter creates a footer matching form page style
 func renderMinimalFooter(clusters []models.K3sCluster, width int) string {
-	// Help text - centered like form page
-	helpStyle := lipgloss.NewStyle().
-		Foreground(ColorGray).
-		Width(width).
-		Align(lipgloss.Center)
-	
-	helpContent := helpStyle.Render("↑/↓: navigate • ↵: details • c: create • d: delete • s: sync • q: quit")
-	
-	// Status bar - same style as form page
+	// Calculate status
 	var running, total int
 	for _, c := range clusters {
 		total++
@@ -254,7 +246,10 @@ func renderMinimalFooter(clusters []models.K3sCluster, width int) string {
 	var statusColor lipgloss.Color
 	var statusText string
 	
-	if running > 0 {
+	if total == 0 {
+		statusColor = ColorGray
+		statusText = "○ No clusters"
+	} else if running > 0 {
 		statusColor = ColorGreen
 		statusText = fmt.Sprintf("● %d of %d running", running, total)
 	} else {
@@ -262,15 +257,43 @@ func renderMinimalFooter(clusters []models.K3sCluster, width int) string {
 		statusText = fmt.Sprintf("○ No clusters running")
 	}
 	
+	// Status on the left
 	statusStyle := lipgloss.NewStyle().
-		Foreground(statusColor).
-		Width(width).
-		Padding(0, 1)
+		Foreground(statusColor)
+	
+	// Navigation help on the right
+	navStyle := lipgloss.NewStyle().
+		Foreground(ColorGray)
+	
+	navText := "↑/↓: navigate • ↵: details • c: create • d: delete • s: sync • q: quit"
+	
+	// Calculate padding for alignment
+	statusWidth := lipgloss.Width(statusText)
+	navWidth := lipgloss.Width(navText)
+	paddingWidth := width - statusWidth - navWidth - 4 // 4 for margins
+	
+	if paddingWidth < 0 {
+		paddingWidth = 1
+	}
+	
+	// Create the footer line with proper spacing
+	footerLine := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		" ", // Left margin
+		statusStyle.Render(statusText),
+		strings.Repeat(" ", paddingWidth), // Dynamic spacing
+		navStyle.Render(navText),
+		" ", // Right margin
+	)
+	
+	// Add separator above footer
+	separator := strings.Repeat("─", width)
+	sepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
 	
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
-		helpContent,
-		statusStyle.Render(statusText),
+		sepStyle.Render(separator),
+		footerLine,
 	)
 }
 

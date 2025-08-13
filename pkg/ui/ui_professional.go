@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/madhouselabs/goman/pkg/storage"
@@ -666,6 +667,131 @@ func RenderProHelp(context string) string {
 // RenderProLoading renders minimal loading state
 func RenderProLoading(message string) string {
 	return "\n  " + proDim.Render("• "+message)
+}
+
+// RenderProDetailLoading renders loading state for cluster detail view with spinner
+func RenderProDetailLoading(cluster models.K3sCluster, s spinner.Model, width, height int) string {
+	// Ensure minimum dimensions
+	if width < 80 {
+		width = 80
+	}
+	if height < 20 {
+		height = 20
+	}
+
+	// Header section - matching minimal_dashboard.go style
+	headerStyle := lipgloss.NewStyle().
+		Foreground(ColorWhite).
+		Bold(true).
+		Padding(0, 1)
+	
+	header := headerStyle.Render("CLUSTER DETAILS")
+	
+	// Separator
+	separator := strings.Repeat("─", width)
+	sepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
+	
+	// Calculate content area height
+	headerHeight := 3   // Title + separator + spacing
+	footerHeight := 3   // Help + status
+	contentHeight := height - headerHeight - footerHeight
+	if contentHeight < 5 {
+		contentHeight = 5
+	}
+	
+	// Content area with loading message
+	contentStyle := lipgloss.NewStyle().
+		Width(width).
+		Height(contentHeight).
+		Align(lipgloss.Center, lipgloss.Center)
+	
+	// Create loading box with spinner
+	loadingBoxStyle := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(ColorBorder).
+		Padding(2, 4).
+		Width(60)
+	
+	// Loading content with spinner
+	spinnerView := s.View()
+	
+	clusterNameStyle := lipgloss.NewStyle().
+		Foreground(ColorWhite).
+		Bold(true)
+	
+	loadingTextStyle := lipgloss.NewStyle().
+		Foreground(ColorGray)
+	
+	// Build loading box content
+	loadingContent := lipgloss.JoinVertical(
+		lipgloss.Center,
+		clusterNameStyle.Render(cluster.Name),
+		"",
+		lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			spinnerView,
+			" ",
+			loadingTextStyle.Render("Fetching cluster details..."),
+		),
+		"",
+		loadingTextStyle.Render("Retrieving instance information from S3"),
+	)
+	
+	// Apply box styling
+	loadingBox := loadingBoxStyle.Render(loadingContent)
+	
+	// Center the loading box
+	centeredContent := contentStyle.Render(loadingBox)
+	
+	// Footer with status and navigation - consistent layout
+	// Status text
+	statusText := "◐ Loading from S3..."
+	statusStyle := lipgloss.NewStyle().
+		Foreground(ColorYellow)
+	
+	// Navigation help on the right
+	navStyle := lipgloss.NewStyle().
+		Foreground(ColorGray)
+	
+	navText := "esc: cancel"
+	
+	// Calculate padding for alignment
+	statusWidth := lipgloss.Width(statusText)
+	navWidth := lipgloss.Width(navText)
+	paddingWidth := width - statusWidth - navWidth - 4 // 4 for margins
+	
+	if paddingWidth < 0 {
+		paddingWidth = 1
+	}
+	
+	// Create the footer line with proper spacing
+	footerLine := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		" ", // Left margin
+		statusStyle.Render(statusText),
+		strings.Repeat(" ", paddingWidth), // Dynamic spacing
+		navStyle.Render(navText),
+		" ", // Right margin
+	)
+	
+	// Add separator above footer
+	footerSeparator := strings.Repeat("─", width)
+	footerSepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
+	
+	footer := lipgloss.JoinVertical(
+		lipgloss.Left,
+		footerSepStyle.Render(footerSeparator),
+		footerLine,
+	)
+	
+	// Combine all components
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		sepStyle.Render(separator),
+		centeredContent,
+		footer,
+	)
 }
 
 // RenderProMessage renders status messages

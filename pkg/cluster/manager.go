@@ -19,9 +19,11 @@ var (
 
 // Manager handles k3s cluster operations
 type Manager struct {
-	mu       sync.RWMutex // Protects clusters slice
-	clusters []models.K3sCluster
-	storage  *storage.Storage
+	mu         sync.RWMutex // Protects clusters slice
+	clusters   []models.K3sCluster
+	storage    *storage.Storage
+	stateCache *StateCache // Cache for cluster states with background updates
+	hasSynced  bool       // Track if we've done at least one sync
 }
 
 // NewManager creates a new cluster manager
@@ -34,30 +36,34 @@ func NewManager() *Manager {
 		}
 	}
 
-	// Load clusters from storage
-	states, err := storage.LoadAllClusterStates()
-	if err != nil {
-		// If error loading states, start with empty list
-		return &Manager{
-			clusters: []models.K3sCluster{},
-			storage:  storage,
-		}
-	}
-
-	// Extract clusters from states
-	var clusters []models.K3sCluster
-	for _, state := range states {
-		clusters = append(clusters, state.Cluster)
-	}
-
+	// Create state cache for background updates
+	stateCache := NewStateCache(storage)
+	
+	// Skip initial load - let background updater handle it
+	// This prevents blocking on startup
+	
+	// Return manager with cache (will populate in background)
 	return &Manager{
-		clusters: clusters,
-		storage:  storage,
+		clusters:   []models.K3sCluster{},
+		storage:    storage,
+		stateCache: stateCache,
 	}
 }
 
 // GetClusters returns all clusters
 func (m *Manager) GetClusters() []models.K3sCluster {
+	// If we have a state cache, use it for instant response
+	if m.stateCache != nil {
+		clusters := m.stateCache.GetClusters()
+		// If cache is empty and we haven't synced, force a sync
+		if len(clusters) == 0 && !m.HasSyncedOnce() {
+			// Do a quick synchronous load on first access
+			m.loadClustersFromStorage()
+		}
+		return m.stateCache.GetClusters()
+	}
+	
+	// Fallback to local clusters list
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -65,6 +71,33 @@ func (m *Manager) GetClusters() []models.K3sCluster {
 	result := make([]models.K3sCluster, len(m.clusters))
 	copy(result, m.clusters)
 	return result
+}
+
+// loadClustersFromStorage does a synchronous load from storage
+func (m *Manager) loadClustersFromStorage() {
+	if m.storage == nil {
+		return
+	}
+	
+	states, err := m.storage.LoadAllClusterStates()
+	if err != nil {
+		// Failed to load, but don't block
+		return
+	}
+	
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// Mark as synced
+	m.hasSynced = true
+	
+	// Update clusters
+	m.clusters = []models.K3sCluster{}
+	for _, state := range states {
+		if state != nil {
+			m.clusters = append(m.clusters, state.Cluster)
+		}
+	}
 }
 
 // ensureInfrastructureSetup ensures all required infrastructure is set up
@@ -94,6 +127,12 @@ func ensureInfrastructureSetup() error {
 	})
 
 	return setupErr
+}
+
+// InitializeInfrastructure initializes required infrastructure
+// This should be called once during app startup, not during operations
+func (m *Manager) InitializeInfrastructure() error {
+	return ensureInfrastructureSetup()
 }
 
 // CreateCluster creates a new k3s cluster
@@ -144,7 +183,11 @@ func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 		if err := m.saveClusterStatus(cluster); err != nil {
 			return nil, fmt.Errorf("failed to save cluster status: %w", err)
 		}
-
+		
+		// Request cache update for this cluster
+		if m.stateCache != nil {
+			m.stateCache.RequestUpdate(cluster.Name)
+		}
 	}
 
 	// Add to cluster list only after successful save
@@ -250,39 +293,28 @@ func (m *Manager) GetClusterDetails(clusterName string) (*storage.K3sClusterStat
 
 // GetAllClusterStates returns states for all clusters
 func (m *Manager) GetAllClusterStates() map[string]*storage.K3sClusterState {
-	states := make(map[string]*storage.K3sClusterState)
-	
-	if m.storage == nil {
-		return states
+	// Use cached states for instant response (no blocking)
+	if m.stateCache != nil {
+		return m.stateCache.GetAllStates()
 	}
 	
-	// Load states for all clusters
-	m.mu.RLock()
-	clusters := make([]models.K3sCluster, len(m.clusters))
-	copy(clusters, m.clusters)
-	m.mu.RUnlock()
-	
-	for _, cluster := range clusters {
-		state, err := m.storage.LoadClusterState(cluster.Name)
-		if err == nil && state != nil {
-			states[cluster.Name] = state
-		}
-	}
-	
-	return states
+	// Fallback to empty if no cache
+	return make(map[string]*storage.K3sClusterState)
 }
 
 // SyncFromProvider syncs cluster state from the cloud provider
 func (m *Manager) SyncFromProvider() error {
-	// Ensure infrastructure is set up before syncing
-	if err := ensureInfrastructureSetup(); err != nil {
-		return fmt.Errorf("failed to ensure infrastructure setup: %w", err)
+	// Infrastructure should already be set up at app initialization
+	// This method now only syncs cluster state without blocking on setup
+	
+	// If we have a state cache, request an immediate refresh
+	if m.stateCache != nil {
+		m.stateCache.RequestFullRefresh()
+		// Return immediately - refresh happens in background
+		return nil
 	}
-
-	// In the serverless architecture, syncing happens automatically
-	// through storage updates. This method triggers a manual sync.
-
-	// Reload state from storage
+	
+	// Fallback to direct load if no cache (shouldn't happen normally)
 	if m.storage != nil {
 		states, err := m.storage.LoadAllClusterStates()
 		if err != nil {
@@ -304,6 +336,19 @@ func (m *Manager) SyncFromProvider() error {
 
 // RefreshClusterStatus refreshes cluster status from storage
 func (m *Manager) RefreshClusterStatus() {
+	// Mark that we've done at least one sync
+	m.mu.Lock()
+	m.hasSynced = true
+	m.mu.Unlock()
+	
+	// If we have a state cache, it's already refreshing in background
+	if m.stateCache != nil {
+		// Just trigger a refresh request, don't block
+		m.stateCache.RequestFullRefresh()
+		return
+	}
+	
+	// Fallback to direct refresh if no cache
 	// Reload clusters from storage to get latest state
 	if m.storage != nil {
 		states, err := m.storage.LoadAllClusterStates()
@@ -372,4 +417,12 @@ func (m *Manager) saveClusterStatus(cluster models.K3sCluster) error {
 	// Save to status.json file
 	statusKey := fmt.Sprintf("clusters/%s/status.json", cluster.Name)
 	return m.storage.SaveClusterStateToKey(statusState, statusKey)
+}
+
+
+// HasSyncedOnce returns true if at least one sync has been performed
+func (m *Manager) HasSyncedOnce() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hasSynced
 }

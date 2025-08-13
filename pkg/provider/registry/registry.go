@@ -12,7 +12,8 @@ import (
 func GetProvider(providerType, profile, region string) (provider.Provider, error) {
 	switch providerType {
 	case "aws":
-		return aws.NewProvider(profile, region)
+		// Use cached provider to avoid repeated STS calls
+		return aws.GetCachedProvider(profile, region)
 	case "gcp":
 		// return gcp.NewProvider(profile, region)
 		return nil, fmt.Errorf("GCP provider not yet implemented")

@@ -295,18 +295,45 @@ func RenderClusterForm(width, height int, isUpdate bool, fields []FormField, foc
 		statusText = statusText + ": " + statusMsg
 	}
 	
+	// Footer with status and navigation - same layout as dashboard
+	// Status on the left
 	statusStyle := lipgloss.NewStyle().
-		Foreground(statusColor).
-		Width(width).
-		Padding(0, 1)
+		Foreground(statusColor)
 	
-	// Help text
-	helpStyle := lipgloss.NewStyle().
-		Foreground(ColorGray).
-		Width(width).
-		Align(lipgloss.Center)
+	// Navigation help on the right
+	navStyle := lipgloss.NewStyle().
+		Foreground(ColorGray)
 	
-	helpText := "Tab: next field • Enter: submit • Esc: cancel"
+	navText := "Tab: next field • Enter: submit • Esc: cancel"
+	
+	// Calculate padding for alignment
+	statusWidth := lipgloss.Width(statusText)
+	navWidth := lipgloss.Width(navText)
+	paddingWidth := width - statusWidth - navWidth - 4 // 4 for margins
+	
+	if paddingWidth < 0 {
+		paddingWidth = 1
+	}
+	
+	// Create the footer line with proper spacing
+	footerLine := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		" ", // Left margin
+		statusStyle.Render(statusText),
+		strings.Repeat(" ", paddingWidth), // Dynamic spacing
+		navStyle.Render(navText),
+		" ", // Right margin
+	)
+	
+	// Add separator above footer
+	footerSeparator := strings.Repeat("─", width)
+	footerSepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
+	
+	footer := lipgloss.JoinVertical(
+		lipgloss.Left,
+		footerSepStyle.Render(footerSeparator),
+		footerLine,
+	)
 	
 	// Build the viewport
 	viewport := lipgloss.JoinVertical(
@@ -314,8 +341,7 @@ func RenderClusterForm(width, height int, isUpdate bool, fields []FormField, foc
 		titleText,
 		sepStyle.Render(separator),
 		centeredForm,
-		helpStyle.Render(helpText),
-		statusStyle.Render(statusText),
+		footer,
 	)
 	
 	return viewport
@@ -617,14 +643,7 @@ func RenderClusterFormWithDropdown(width, height int, isUpdate bool, fields []Fo
 		centeredForm = lipgloss.Place(width, contentHeight, lipgloss.Center, lipgloss.Center, formContainer)
 	}
 	
-	// Help text
-	helpStyle := lipgloss.NewStyle().
-		Foreground(ColorGray).
-		Width(width).
-		Align(lipgloss.Center)
-	
-	helpContent := helpStyle.Render("Tab: next field • Enter: select/submit • Esc: cancel")
-	
+	// Footer with status and navigation - same layout as dashboard
 	// Status bar
 	var statusColor lipgloss.Color
 	var statusText string
@@ -656,10 +675,44 @@ func RenderClusterFormWithDropdown(width, height int, isUpdate bool, fields []Fo
 		statusText = statusText + ": " + statusMsg
 	}
 	
+	// Status on the left
 	statusStyle := lipgloss.NewStyle().
-		Foreground(statusColor).
-		Width(width).
-		Padding(0, 1)
+		Foreground(statusColor)
+	
+	// Navigation help on the right
+	navStyle := lipgloss.NewStyle().
+		Foreground(ColorGray)
+	
+	navText := "Tab: next field • Enter: select/submit • Esc: cancel"
+	
+	// Calculate padding for alignment
+	statusWidth := lipgloss.Width(statusText)
+	navWidth := lipgloss.Width(navText)
+	paddingWidth := width - statusWidth - navWidth - 4 // 4 for margins
+	
+	if paddingWidth < 0 {
+		paddingWidth = 1
+	}
+	
+	// Create the footer line with proper spacing
+	footerLine := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		" ", // Left margin
+		statusStyle.Render(statusText),
+		strings.Repeat(" ", paddingWidth), // Dynamic spacing
+		navStyle.Render(navText),
+		" ", // Right margin
+	)
+	
+	// Add separator above footer
+	footerSeparator := strings.Repeat("─", width)
+	footerSepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
+	
+	footer := lipgloss.JoinVertical(
+		lipgloss.Left,
+		footerSepStyle.Render(footerSeparator),
+		footerLine,
+	)
 	
 	// Build the viewport
 	viewport := lipgloss.JoinVertical(
@@ -667,8 +720,7 @@ func RenderClusterFormWithDropdown(width, height int, isUpdate bool, fields []Fo
 		titleText,
 		sepStyle.Render(separator),
 		centeredForm,
-		helpContent,
-		statusStyle.Render(statusText),
+		footer,
 	)
 	
 	return viewport

@@ -15,6 +15,7 @@ import (
 
 	"github.com/madhouselabs/goman/pkg/cluster"
 	"github.com/madhouselabs/goman/pkg/config"
+	"github.com/madhouselabs/goman/pkg/datamanager"
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/madhouselabs/goman/pkg/storage"
 	"github.com/madhouselabs/goman/pkg/ui"
@@ -36,11 +37,16 @@ type model struct {
 	state           viewState
 	clusters        []models.K3sCluster
 	clusterStates   map[string]*storage.K3sClusterState // Cached cluster states
+	dataManager     *datamanager.DataManager            // Central data manager
+	subscriber      *datamanager.TUISubscriber          // Data subscriber
 	clusterManager  *cluster.Manager
 	storage         *storage.Storage
 	config          *config.Config
 	selectedIndex   int
 	selectedCluster *models.K3sCluster
+	selectedClusterState *storage.K3sClusterState // Detailed state for selected cluster
+	detailLoading   bool                        // Loading state for detail view
+	initialLoading  bool                        // Initial data loading state
 	form            *ui.ProForm
 	viewport        viewport.Model
 	spinner         spinner.Model
@@ -66,8 +72,22 @@ func initialModel() (model, error) {
 		return model{}, err
 	}
 
+	// Create DataManager for centralized data management
+	dataManager, err := datamanager.NewDataManager()
+	if err != nil {
+		return model{}, err
+	}
+
+	// Create TUI subscriber
+	subscriber := datamanager.NewTUISubscriber(
+		"main-tui",
+		[]datamanager.DataType{
+			datamanager.DataTypeClusters,
+			datamanager.DataTypeClusterStates,
+		},
+	)
+
 	clusterManager := cluster.NewManager()
-	clusters := clusterManager.GetClusters()
 
 	// Setup spinner
 	s := spinner.New()
@@ -77,11 +97,13 @@ func initialModel() (model, error) {
 	// Setup viewport
 	vp := viewport.New(80, 20)
 
-	// Initialize with empty states - will be populated by first refresh
+	// Initialize with empty states - will be populated by DataManager
 	return model{
 		state:          viewList,
-		clusters:       clusters,
+		clusters:       []models.K3sCluster{},
 		clusterStates:  make(map[string]*storage.K3sClusterState),
+		dataManager:    dataManager,
+		subscriber:     subscriber,
 		clusterManager: clusterManager,
 		storage:        stor,
 		config:         config,
@@ -92,17 +114,42 @@ func initialModel() (model, error) {
 		selectedIndex:  0,
 		width:          80,  // Default width until window size is known
 		height:         24,  // Default height until window size is known
+		initialLoading: true, // Start with loading state
 	}, nil
 }
 
 func (m model) Init() tea.Cmd {
-	// Auto-sync from provider on startup (infrastructure already initialized)
+	// Subscribe to data updates with 30 second refresh rate
+	subscribeCmd := datamanager.SubscribeCmd(m.dataManager, datamanager.SubscriptionConfig{
+		SubscriberID: "main-tui",
+		DataTypes: []datamanager.DataType{
+			datamanager.DataTypeClusters,
+			datamanager.DataTypeClusterStates,
+		},
+		RefreshRate: 30 * time.Second,
+		Priority:    datamanager.PriorityNormal,
+	})
+	
+	// Request initial data immediately
+	initialDataCmd := datamanager.RequestDataCmd(m.dataManager, datamanager.DataRequest{
+		ID:       "initial-load",
+		Type:     datamanager.DataTypeClusters,
+		Policy:   datamanager.PolicyFreshIfStale,
+		Priority: datamanager.PriorityHigh,
+	})
+	
+	// Also trigger immediate refresh via the old polling mechanism
+	immediateRefreshCmd := func() tea.Msg {
+		return ui.RefreshClustersMsg{}
+	}
+	
 	return tea.Batch(
 		m.spinner.Tick,
 		tea.EnterAltScreen,
-		m.syncClusters(),
-		m.fetchInitialStates(), // Fetch states immediately for initial render
-		m.startPolling(), // Start continuous polling for updates
+		subscribeCmd,
+		initialDataCmd,
+		immediateRefreshCmd,        // Trigger immediate refresh
+		m.listenForUpdates(), // Start listening for data updates
 	)
 }
 
@@ -151,6 +198,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case spinner.TickMsg:
+		// Update spinner for both general loading and detail loading
+		if m.loading || m.detailLoading {
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+
+	case datamanager.DataUpdate:
+		// Handle data updates from DataManager
+		switch msg.Type {
+		case datamanager.DataTypeClusters:
+			if clusterData, ok := msg.Data.([]models.K3sCluster); ok {
+				m.clusters = clusterData
+				// Only clear initial loading if we've actually loaded data or confirmed empty
+				// Don't clear on first empty response as it might be cached empty state
+				if len(clusterData) > 0 || m.clusterManager.HasSyncedOnce() {
+					m.initialLoading = false
+				}
+			}
+		case datamanager.DataTypeClusterStates:
+			if states, ok := msg.Data.(map[string]*storage.K3sClusterState); ok {
+				m.clusterStates = states
+			}
+		}
+		// Continue listening for updates
+		return m, m.listenForUpdates()
+		
+	case datamanager.DataManagerMsg:
+		// Handle DataManager responses
+		if msg.Response != nil && msg.Response.Data != nil {
+			switch msg.Response.Type {
+			case datamanager.DataTypeClusters:
+				if clusters, ok := msg.Response.Data.([]models.K3sCluster); ok {
+					m.clusters = clusters
+					// Only clear initial loading if we've actually loaded data or confirmed empty
+					if len(clusters) > 0 || m.clusterManager.HasSyncedOnce() {
+						m.initialLoading = false
+					}
+				}
+			case datamanager.DataTypeClusterStates:
+				if states, ok := msg.Response.Data.(map[string]*storage.K3sClusterState); ok {
+					m.clusterStates = states
+				}
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		switch m.state {
 		case viewList:
@@ -176,7 +270,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, m.keys.Enter):
 				if len(m.clusters) > 0 && m.selectedIndex < len(m.clusters) {
 					m.selectedCluster = &m.clusters[m.selectedIndex]
+					m.selectedClusterState = nil // Clear previous state
+					m.detailLoading = true        // Set loading state
 					m.state = viewDetail
+					// Fetch details asynchronously and start spinner
+					return m, tea.Batch(
+						m.fetchClusterDetails(m.selectedCluster.Name),
+						m.spinner.Tick,
+					)
 				}
 
 			case key.Matches(msg, m.keys.Delete):
@@ -187,9 +288,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case key.Matches(msg, m.keys.Sync):
-				m.loading = true
-				m.loadingMsg = "Syncing clusters from provider..."
-				return m, m.syncClusters()
+				// Request fresh data from DataManager
+				return m, datamanager.RefreshDataCmd(m.dataManager, datamanager.DataTypeClusters)
 			}
 
 		case viewCreate:
@@ -284,8 +384,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clusters = m.clusterManager.GetClusters()
 		// Cache cluster states for rendering
 		m.clusterStates = m.clusterManager.GetAllClusterStates()
+		// Clear initial loading since we've done a real refresh
+		m.initialLoading = false
 		// Continue polling for updates
 		return m, m.startPolling()
+
+	case ui.ClusterDetailsLoadedMsg:
+		// Details loaded for selected cluster
+		m.selectedClusterState = msg.State
+		m.detailLoading = false
+		return m, nil
 
 	case ui.ErrorMsg:
 		m.loading = false
@@ -300,12 +408,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ui.ClearErrorMsg:
 		m.err = nil
 		return m, nil
-
-	case spinner.TickMsg:
-		if m.loading {
-			m.spinner, cmd = m.spinner.Update(msg)
-			return m, cmd
-		}
 	}
 
 	// Update viewport if in detail view
@@ -318,8 +420,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	// Show loading state during initial data fetch
+	if m.initialLoading && len(m.clusters) == 0 {
+		return ui.RenderSimpleLoadingWithSpinner("Loading clusters...", m.spinner, m.width, m.height)
+	}
+	
 	if m.loading {
-		return ui.RenderProLoading(m.loadingMsg)
+		return ui.RenderSimpleLoadingWithSpinner(m.loadingMsg, m.spinner, m.width, m.height)
 	}
 
 	switch m.state {
@@ -334,13 +441,16 @@ func (m model) View() string {
 		return "Form not initialized"
 	case viewDetail:
 		if m.selectedCluster != nil {
-			// Try to get detailed state
-			state, err := m.clusterManager.GetClusterDetails(m.selectedCluster.Name)
-			if err != nil {
-				// Fallback to basic view if state unavailable
-				return ui.RenderProDetail(*m.selectedCluster)
+			// Show loading state while fetching details
+			if m.detailLoading {
+				return ui.RenderProDetailLoading(*m.selectedCluster, m.spinner, m.width, m.height)
 			}
-			return ui.RenderProDetailWithState(*m.selectedCluster, state)
+			// Show details with state if available
+			if m.selectedClusterState != nil {
+				return ui.RenderProDetailWithState(*m.selectedCluster, m.selectedClusterState)
+			}
+			// Fallback to basic view
+			return ui.RenderProDetail(*m.selectedCluster)
 		}
 		return "No cluster selected"
 	case viewConfirmDelete:
@@ -414,6 +524,32 @@ func (m *model) fetchInitialStates() tea.Cmd {
 	return func() tea.Msg {
 		// This will be handled by RefreshClustersMsg handler
 		return ui.RefreshClustersMsg{}
+	}
+}
+
+// fetchClusterDetails fetches detailed state for a specific cluster
+func (m *model) fetchClusterDetails(clusterName string) tea.Cmd {
+	return func() tea.Msg {
+		state, err := m.clusterManager.GetClusterDetails(clusterName)
+		if err != nil {
+			return ui.ErrorMsg{Err: err}
+		}
+		return ui.ClusterDetailsLoadedMsg{State: state}
+	}
+}
+
+// listenForUpdates listens for data updates from DataManager
+func (m *model) listenForUpdates() tea.Cmd {
+	return func() tea.Msg {
+		// Get update channel from DataManager
+		updateChan, exists := m.dataManager.GetUpdateChannel("main-tui")
+		if !exists {
+			return nil
+		}
+		
+		// Listen for updates
+		update := <-updateChan
+		return update
 	}
 }
 

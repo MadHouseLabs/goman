@@ -11,9 +11,9 @@ import (
 	"github.com/madhouselabs/goman/pkg/storage"
 )
 
-// RenderLoading renders a loading screen
-func RenderLoading(width, height int, message string, spinner spinner.Model) string {
-	return RenderProLoading(message)
+// RenderLoading renders a loading screen with spinner
+func RenderLoading(width, height int, message string, s spinner.Model) string {
+	return RenderSimpleLoadingWithSpinner(message, s, width, height)
 }
 
 // RenderClusterList renders the cluster list view
