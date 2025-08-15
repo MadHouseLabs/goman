@@ -11,7 +11,6 @@ type ClusterDeletedMsg struct{}
 type ClusterStartedMsg struct{}
 type ClusterStoppedMsg struct{}
 type ClustersSyncedMsg struct{}
-type RefreshClustersMsg struct{}
 type ErrorMsg struct{ Err error }
 type ClearMessageMsg struct{}
 type ClearErrorMsg struct{}

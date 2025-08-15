@@ -12,6 +12,11 @@ type Storage struct {
 	backend StorageBackend
 }
 
+// GetBackend returns the underlying storage backend
+func (s *Storage) GetBackend() StorageBackend {
+	return s.backend
+}
+
 // K3sClusterState represents the complete state of a k3s cluster with AWS resources
 type K3sClusterState struct {
 	Cluster        models.K3sCluster      `json:"cluster"`

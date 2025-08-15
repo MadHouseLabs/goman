@@ -285,6 +285,18 @@ func (h *LambdaHandler) scheduleRequeue(ctx context.Context, clusterName string,
 		return nil // Not an error, just skip requeue
 	}
 
+	// First check if the cluster still exists before scheduling requeue
+	configKey := fmt.Sprintf("clusters/%s/config.json", clusterName)
+	_, err := h.provider.GetStorageService().GetObject(ctx, configKey)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "NoSuchKey") {
+			log.Printf("Cluster %s no longer exists, not scheduling requeue", clusterName)
+			return nil // Cluster deleted, don't requeue
+		}
+		// Some other error checking existence, log but continue with requeue
+		log.Printf("Warning: could not check cluster %s existence: %v", clusterName, err)
+	}
+
 	// Calculate delay in seconds (SQS supports 0-900 seconds)
 	delaySeconds := int32(requeueAfter.Seconds())
 	if delaySeconds > 900 {

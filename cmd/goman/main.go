@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -18,6 +19,7 @@ import (
 	"github.com/madhouselabs/goman/pkg/datamanager"
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/madhouselabs/goman/pkg/storage"
+	"github.com/madhouselabs/goman/pkg/tui/components"
 	"github.com/madhouselabs/goman/pkg/ui"
 )
 
@@ -59,6 +61,12 @@ type model struct {
 	loading         bool
 	loadingMsg      string
 	deleteTarget    *models.K3sCluster // Cluster pending deletion
+	clusterListView *ui.ClusterListView // New cluster list view
+	clusterTable    *components.ClusterTableComponent  // Cluster table component that manages its own state
+	
+	// Optimistic update tracking
+	pendingCreates  map[string]models.K3sCluster // Clusters being created (key: cluster ID)
+	pendingDeletes  map[string]bool              // Clusters being deleted (key: cluster ID)
 }
 
 func initialModel() (model, error) {
@@ -97,11 +105,20 @@ func initialModel() (model, error) {
 	// Setup viewport
 	vp := viewport.New(80, 20)
 
+	// Initialize cluster table component that manages its own state
+	clusterTable := components.NewClusterTable("cluster-table")
+	clusterTable.SetDimensions(80, 20)
+	clusterTable.Focus() // Set focus for keyboard navigation
+
 	// Initialize with empty states - will be populated by DataManager
-	return model{
+	// Load initial clusters synchronously
+	initialClusters := clusterManager.GetClusters()
+	initialStates := clusterManager.GetAllClusterStates()
+	
+	m := model{
 		state:          viewList,
-		clusters:       []models.K3sCluster{},
-		clusterStates:  make(map[string]*storage.K3sClusterState),
+		clusters:       initialClusters,
+		clusterStates:  initialStates,
 		dataManager:    dataManager,
 		subscriber:     subscriber,
 		clusterManager: clusterManager,
@@ -114,19 +131,31 @@ func initialModel() (model, error) {
 		selectedIndex:  0,
 		width:          80,  // Default width until window size is known
 		height:         24,  // Default height until window size is known
-		initialLoading: true, // Start with loading state
-	}, nil
+		initialLoading: len(initialClusters) == 0, // Only show loading if no clusters yet
+		clusterListView: nil, // Not needed anymore
+		clusterTable:   clusterTable,    // Persistent table component
+		pendingCreates: make(map[string]models.K3sCluster),
+		pendingDeletes: make(map[string]bool),
+	}
+	
+	// Set initial data in table
+	clusterTable.SetClusters(initialClusters, initialStates)
+	
+	// Initialize the table component
+	clusterTable.Init()
+	
+	return m, nil
 }
 
 func (m model) Init() tea.Cmd {
-	// Subscribe to data updates with 30 second refresh rate
+	// Subscribe to data updates with 5 second refresh rate
 	subscribeCmd := datamanager.SubscribeCmd(m.dataManager, datamanager.SubscriptionConfig{
 		SubscriberID: "main-tui",
 		DataTypes: []datamanager.DataType{
 			datamanager.DataTypeClusters,
 			datamanager.DataTypeClusterStates,
 		},
-		RefreshRate: 30 * time.Second,
+		RefreshRate: 5 * time.Second,
 		Priority:    datamanager.PriorityNormal,
 	})
 	
@@ -138,17 +167,11 @@ func (m model) Init() tea.Cmd {
 		Priority: datamanager.PriorityHigh,
 	})
 	
-	// Also trigger immediate refresh via the old polling mechanism
-	immediateRefreshCmd := func() tea.Msg {
-		return ui.RefreshClustersMsg{}
-	}
-	
 	return tea.Batch(
 		m.spinner.Tick,
 		tea.EnterAltScreen,
 		subscribeCmd,
 		initialDataCmd,
-		immediateRefreshCmd,        // Trigger immediate refresh
 		m.listenForUpdates(), // Start listening for data updates
 	)
 }
@@ -157,12 +180,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
+	// Update the table component if in list view
+	if m.state == viewList && m.clusterTable != nil {
+		_, tableCmd := m.clusterTable.Update(msg)
+		if tableCmd != nil {
+			cmds = append(cmds, tableCmd)
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.viewport.Width = m.width - 4
 		m.viewport.Height = m.height - 10
+		// Update table dimensions
+		m.updateClusterTable()
 		return m, nil
 
 	case tea.MouseMsg:
@@ -191,6 +224,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cluster := m.form.GetCluster()
 					m.loading = true
 					m.loadingMsg = fmt.Sprintf("Creating cluster %s...", cluster.Name)
+					
+					// Track as pending creation for optimistic update
+					cluster.Status = "pending"
+					m.pendingCreates[cluster.ID] = cluster
+					
+					// Don't directly modify clusters - let mergeWithPending handle it
+					
 					return m, m.createCluster(cluster)
 				}
 
@@ -210,16 +250,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case datamanager.DataTypeClusters:
 			if clusterData, ok := msg.Data.([]models.K3sCluster); ok {
-				m.clusters = clusterData
+				// Merge with pending operations instead of direct replacement
+				m.clusters = m.mergeWithPending(clusterData)
 				// Only clear initial loading if we've actually loaded data or confirmed empty
 				// Don't clear on first empty response as it might be cached empty state
 				if len(clusterData) > 0 || m.clusterManager.HasSyncedOnce() {
 					m.initialLoading = false
 				}
+				// Update table data
+				m.updateClusterTable()
 			}
 		case datamanager.DataTypeClusterStates:
 			if states, ok := msg.Data.(map[string]*storage.K3sClusterState); ok {
 				m.clusterStates = states
+				// Update table data
+				m.updateClusterTable()
 			}
 		}
 		// Continue listening for updates
@@ -248,19 +293,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch m.state {
 		case viewList:
+			// Handle special keys first
 			switch {
 			case key.Matches(msg, m.keys.Quit):
 				return m, tea.Quit
-
-			case key.Matches(msg, m.keys.Up):
-				if m.selectedIndex > 0 {
-					m.selectedIndex--
-				}
-
-			case key.Matches(msg, m.keys.Down):
-				if m.selectedIndex < len(m.clusters)-1 {
-					m.selectedIndex++
-				}
 
 			case key.Matches(msg, m.keys.Create):
 				m.state = viewCreate
@@ -268,29 +304,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case key.Matches(msg, m.keys.Enter):
-				if len(m.clusters) > 0 && m.selectedIndex < len(m.clusters) {
-					m.selectedCluster = &m.clusters[m.selectedIndex]
-					m.selectedClusterState = nil // Clear previous state
-					m.detailLoading = true        // Set loading state
-					m.state = viewDetail
-					// Fetch details asynchronously and start spinner
-					return m, tea.Batch(
-						m.fetchClusterDetails(m.selectedCluster.Name),
-						m.spinner.Tick,
-					)
+				// Get selected cluster directly from the component
+				if m.clusterTable != nil {
+					if selected := m.clusterTable.GetSelectedCluster(); selected != nil {
+						m.selectedCluster = selected
+						m.selectedIndex = m.clusterTable.GetSelectedIndex()
+						m.selectedClusterState = nil // Clear previous state
+						m.detailLoading = true        // Set loading state
+						m.state = viewDetail
+						// Fetch details asynchronously and start spinner
+						return m, tea.Batch(
+							m.fetchClusterDetails(m.selectedCluster.Name),
+							m.spinner.Tick,
+						)
+					}
 				}
 
 			case key.Matches(msg, m.keys.Delete):
-				if len(m.clusters) > 0 && m.selectedIndex < len(m.clusters) {
-					m.deleteTarget = &m.clusters[m.selectedIndex]
-					m.state = viewConfirmDelete
-					return m, nil
+				// Get selected cluster from component
+				if m.clusterTable != nil {
+					if selected := m.clusterTable.GetSelectedCluster(); selected != nil {
+						m.deleteTarget = selected
+						m.state = viewConfirmDelete
+						return m, nil
+					}
 				}
 
 			case key.Matches(msg, m.keys.Sync):
 				// Request fresh data from DataManager
 				return m, datamanager.RefreshDataCmd(m.dataManager, datamanager.DataTypeClusters)
 			}
+			
+			// Forward all keys to table component for navigation
+			if m.clusterTable != nil {
+				var tableCmd tea.Cmd
+				var updatedModel tea.Model
+				updatedModel, tableCmd = m.clusterTable.Update(msg)
+				// The ClusterTableComponent returns itself as tea.Model
+				if tc, ok := updatedModel.(*components.ClusterTableComponent); ok {
+					m.clusterTable = tc
+				}
+				
+				// Sync selected index from component
+				m.selectedIndex = m.clusterTable.GetSelectedIndex()
+				
+				return m, tableCmd
+			}
+			
+			return m, nil
 
 		case viewCreate:
 			// Handle escape key to go back
@@ -310,6 +371,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cluster := m.form.GetCluster()
 					m.loading = true
 					m.loadingMsg = fmt.Sprintf("Creating cluster %s...", cluster.Name)
+					
+					// Track as pending creation for optimistic update
+					cluster.Status = "pending"
+					m.pendingCreates[cluster.ID] = cluster
+					
+					// Don't directly modify clusters - let mergeWithPending handle it
+					
 					return m, m.createCluster(cluster)
 				}
 
@@ -328,13 +396,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y":
 				if m.deleteTarget != nil {
-					// Mark cluster as deleting locally before backend operation
+					// Track as pending deletion for optimistic update
+					m.pendingDeletes[m.deleteTarget.ID] = true
+					
+					// Update the status visually
 					for i, c := range m.clusters {
 						if c.ID == m.deleteTarget.ID {
 							m.clusters[i].Status = models.StatusDeleting
 							break
 						}
 					}
+					m.updateClusterTable()
+					
 					m.state = viewList
 					m.message = fmt.Sprintf("Deleting cluster %s...", m.deleteTarget.Name)
 					cmd := m.deleteCluster(m.deleteTarget.ID)
@@ -350,44 +423,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ui.ClusterCreatedMsg:
 		m.loading = false
-		m.clusters = m.clusterManager.GetClusters()
-		// Update cached states after cluster creation
-		m.clusterStates = m.clusterManager.GetAllClusterStates()
 		m.state = viewList
 		m.form = nil
-		m.message = ""
-		// Only clear message, don't trigger refresh as polling is already running
-		return m, m.clearMessage()
+		m.message = "Cluster created, refreshing..."
+		
+		// Remove from pending creates since it's now created
+		if msg.Cluster != nil {
+			delete(m.pendingCreates, msg.Cluster.ID)
+		}
+		
+		// Trigger immediate refresh from S3 to get latest status
+		refreshCmd := datamanager.RequestDataCmd(m.dataManager, datamanager.DataRequest{
+			ID:       "cluster-created-refresh",
+			Type:     datamanager.DataTypeClusters,
+			Policy:   datamanager.PolicyForceRefresh,
+			Priority: datamanager.PriorityHigh,
+		})
+		return m, tea.Batch(m.clearMessage(), refreshCmd)
 
 	case ui.ClusterDeletedMsg:
 		m.loading = false
-		m.clusters = m.clusterManager.GetClusters()
-		// Update cached states after cluster deletion
-		m.clusterStates = m.clusterManager.GetAllClusterStates()
+		m.message = "Cluster deleted, refreshing..."
+		
+		// Clear all pending deletes (we don't have specific ID here)
+		// The next refresh will show the correct state
+		m.pendingDeletes = make(map[string]bool)
+		
 		if m.selectedIndex >= len(m.clusters) && m.selectedIndex > 0 {
 			m.selectedIndex--
 		}
-		m.message = ""
-		return m, m.clearMessage()
+		
+		// Trigger immediate refresh from S3 to get latest status
+		refreshCmd := datamanager.RequestDataCmd(m.dataManager, datamanager.DataRequest{
+			ID:       "cluster-deleted-refresh",
+			Type:     datamanager.DataTypeClusters,
+			Policy:   datamanager.PolicyForceRefresh,
+			Priority: datamanager.PriorityHigh,
+		})
+		return m, tea.Batch(m.clearMessage(), refreshCmd)
 
 	case ui.ClustersSyncedMsg:
 		m.loading = false
-		m.clusters = m.clusterManager.GetClusters()
+		// Use mergeWithPending to properly handle optimistic updates
+		m.clusters = m.mergeWithPending(m.clusterManager.GetClusters())
 		// Update cached states after sync
 		m.clusterStates = m.clusterManager.GetAllClusterStates()
+		m.updateClusterTable()
 		m.message = ""
 		return m, m.clearMessage()
 
-	case ui.RefreshClustersMsg:
-		// Silently refresh cluster list to update statuses
-		m.clusterManager.RefreshClusterStatus()
-		m.clusters = m.clusterManager.GetClusters()
-		// Cache cluster states for rendering
-		m.clusterStates = m.clusterManager.GetAllClusterStates()
-		// Clear initial loading since we've done a real refresh
-		m.initialLoading = false
-		// Continue polling for updates
-		return m, m.startPolling()
 
 	case ui.ClusterDetailsLoadedMsg:
 		// Details loaded for selected cluster
@@ -431,9 +515,8 @@ func (m model) View() string {
 
 	switch m.state {
 	case viewList:
-		// Use cached cluster states for rendering (no API calls)
-		// Use RenderClusterListWithStates to get proper viewport wrapping
-		return ui.RenderClusterListWithStates(m.width, m.height, m.clusters, m.clusterStates, m.selectedIndex)
+		// Use the persistent table for proper interactivity
+		return m.renderClusterListWithTable()
 	case viewCreate:
 		if m.form != nil {
 			return m.form.RenderViewport(m.width, m.height)
@@ -494,16 +577,40 @@ func (m *model) syncClusters() tea.Cmd {
 	}
 }
 
-func (m *model) refreshClusters() tea.Cmd {
-	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-		return ui.RefreshClustersMsg{}
-	})
-}
 
 func (m *model) clearMessage() tea.Cmd {
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
 		return ui.ClearMessageMsg{}
 	})
+}
+
+// mergeWithPending merges incoming cluster data with pending operations
+func (m *model) mergeWithPending(clusters []models.K3sCluster) []models.K3sCluster {
+	// Create a map of existing clusters for quick lookup
+	clusterMap := make(map[string]models.K3sCluster)
+	for _, c := range clusters {
+		// Skip if this cluster is marked for deletion
+		if m.pendingDeletes[c.ID] {
+			continue
+		}
+		clusterMap[c.ID] = c
+	}
+	
+	// Add pending creates that aren't in the backend yet
+	for id, pendingCluster := range m.pendingCreates {
+		if _, exists := clusterMap[id]; !exists {
+			// This cluster is being created but not in backend yet
+			clusterMap[id] = pendingCluster
+		}
+	}
+	
+	// Convert map back to slice
+	result := make([]models.K3sCluster, 0, len(clusterMap))
+	for _, cluster := range clusterMap {
+		result = append(result, cluster)
+	}
+	
+	return result
 }
 
 func (m *model) clearError() tea.Cmd {
@@ -513,19 +620,7 @@ func (m *model) clearError() tea.Cmd {
 }
 
 // startPolling starts continuous polling for cluster updates
-func (m *model) startPolling() tea.Cmd {
-	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
-		return ui.RefreshClustersMsg{}
-	})
-}
 
-// fetchInitialStates fetches cluster states immediately for initial render
-func (m *model) fetchInitialStates() tea.Cmd {
-	return func() tea.Msg {
-		// This will be handled by RefreshClustersMsg handler
-		return ui.RefreshClustersMsg{}
-	}
-}
 
 // fetchClusterDetails fetches detailed state for a specific cluster
 func (m *model) fetchClusterDetails(clusterName string) tea.Cmd {
@@ -550,6 +645,185 @@ func (m *model) listenForUpdates() tea.Cmd {
 		// Listen for updates
 		update := <-updateChan
 		return update
+	}
+}
+
+// updateClusterTable updates the table with current cluster data
+func (m *model) updateClusterTable() {
+	if m.clusterTable == nil {
+		return
+	}
+	
+	// Pass the data to the component
+	m.clusterTable.SetClusters(m.clusters, m.clusterStates)
+	// Set table height to fill the content area (total height - 4 for header/footer)
+	m.clusterTable.SetDimensions(m.width, m.height - 4)
+}
+
+
+// renderClusterListWithTable renders the cluster list view with persistent table
+func (m model) renderClusterListWithTable() string {
+	// Build header
+	header := m.renderHeader()
+	
+	// Build table content
+	var tableContent string
+	contentHeight := m.height - 4 // Account for header (2 lines) and footer (2 lines)
+	
+	
+	if m.clusterTable != nil && len(m.clusters) > 0 {
+		// Show the table when we have clusters
+		tableContent = m.clusterTable.View()
+	} else if len(m.clusters) == 0 {
+		// Empty state
+		emptyStyle := lipgloss.NewStyle().
+			Foreground(ui.ColorGray).
+			Italic(true).
+			Width(m.width).
+			Height(contentHeight).
+			Align(lipgloss.Center, lipgloss.Center)
+		tableContent = emptyStyle.Render("No clusters found. Press 'c' to create a new cluster.")
+	} else {
+		// Table not initialized
+		tableContent = "Loading table..."
+	}
+	
+	// Build footer
+	footer := m.renderFooter()
+	
+	// Combine all sections
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		tableContent,
+		footer,
+	)
+}
+
+// renderHeader renders the header with title and connection status
+func (m model) renderHeader() string {
+	// Title
+	titleStyle := lipgloss.NewStyle().
+		Foreground(ui.ColorWhite).
+		Bold(true).
+		Padding(0, 1)
+	
+	title := titleStyle.Render("GOMAN CLUSTERS")
+	
+	// Connection status
+	statusStyle := lipgloss.NewStyle().Foreground(ui.ColorGreen)
+	region := m.config.AWSRegion
+	statusText := statusStyle.Render(fmt.Sprintf("● Connected to AWS (%s) • Just synced", region))
+	
+	// Calculate padding for right alignment
+	titleWidth := lipgloss.Width(title)
+	statusWidth := lipgloss.Width(statusText)
+	padding := m.width - titleWidth - statusWidth - 2
+	if padding < 0 {
+		padding = 1
+	}
+	
+	// Combine title and status
+	headerLine := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		title,
+		strings.Repeat(" ", padding),
+		statusText,
+		" ",
+	)
+	
+	// Separator
+	separator := strings.Repeat("─", m.width)
+	sepStyle := lipgloss.NewStyle().Foreground(ui.ColorBorder)
+	
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		headerLine,
+		sepStyle.Render(separator),
+	)
+}
+
+// renderFooter renders the footer with stats and keyboard shortcuts
+func (m model) renderFooter() string {
+	// Separator
+	separator := strings.Repeat("─", m.width)
+	sepStyle := lipgloss.NewStyle().Foreground(ui.ColorBorder)
+	
+	// Calculate status
+	var running, total int
+	for _, c := range m.clusters {
+		total++
+		if c.Status == models.StatusRunning {
+			running++
+		}
+	}
+	
+	var statusColor lipgloss.Color
+	var statusText string
+	
+	if total == 0 {
+		statusColor = ui.ColorGray
+		statusText = "○ No clusters"
+	} else if running > 0 {
+		statusColor = ui.ColorGreen
+		statusText = fmt.Sprintf("● %d of %d running", running, total)
+	} else {
+		statusColor = ui.ColorGray
+		statusText = fmt.Sprintf("○ No clusters running")
+	}
+	
+	// Status on the left
+	statusStyle := lipgloss.NewStyle().
+		Foreground(statusColor)
+	
+	// Navigation help on the right
+	navStyle := lipgloss.NewStyle().
+		Foreground(ui.ColorGray)
+	
+	navText := "↑↓/jk: navigate • ↵: details • c: create • d: delete • s: sync • r: refresh • q: quit"
+	
+	// Calculate padding for alignment
+	statusWidth := lipgloss.Width(statusText)
+	navWidth := lipgloss.Width(navText)
+	paddingWidth := m.width - statusWidth - navWidth - 4 // 4 for margins
+	
+	if paddingWidth < 0 {
+		paddingWidth = 1
+	}
+	
+	// Create the footer line with proper spacing
+	footerLine := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		" ", // Left margin
+		statusStyle.Render(statusText),
+		strings.Repeat(" ", paddingWidth), // Dynamic spacing
+		navStyle.Render(navText),
+		" ", // Right margin
+	)
+	
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		sepStyle.Render(separator),
+		footerLine,
+	)
+}
+
+// calculateAge returns a human-readable age string
+func calculateAge(createdAt time.Time) string {
+	if createdAt.IsZero() {
+		return "-"
+	}
+	
+	duration := time.Since(createdAt)
+	
+	if duration < time.Minute {
+		return "now"
+	} else if duration < time.Hour {
+		return fmt.Sprintf("%dm", int(duration.Minutes()))
+	} else if duration < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(duration.Hours()))
+	} else {
+		return fmt.Sprintf("%dd", int(duration.Hours()/24))
 	}
 }
 

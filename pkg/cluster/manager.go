@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -22,7 +23,6 @@ type Manager struct {
 	mu         sync.RWMutex // Protects clusters slice
 	clusters   []models.K3sCluster
 	storage    *storage.Storage
-	stateCache *StateCache // Cache for cluster states with background updates
 	hasSynced  bool       // Track if we've done at least one sync
 }
 
@@ -36,34 +36,21 @@ func NewManager() *Manager {
 		}
 	}
 
-	// Create state cache for background updates
-	stateCache := NewStateCache(storage)
-	
-	// Skip initial load - let background updater handle it
-	// This prevents blocking on startup
-	
-	// Return manager with cache (will populate in background)
-	return &Manager{
+	// Load initial clusters from storage
+	manager := &Manager{
 		clusters:   []models.K3sCluster{},
 		storage:    storage,
-		stateCache: stateCache,
 	}
+	
+	// Do initial load synchronously
+	manager.loadClustersFromStorage()
+	
+	return manager
 }
 
 // GetClusters returns all clusters
 func (m *Manager) GetClusters() []models.K3sCluster {
-	// If we have a state cache, use it for instant response
-	if m.stateCache != nil {
-		clusters := m.stateCache.GetClusters()
-		// If cache is empty and we haven't synced, force a sync
-		if len(clusters) == 0 && !m.HasSyncedOnce() {
-			// Do a quick synchronous load on first access
-			m.loadClustersFromStorage()
-		}
-		return m.stateCache.GetClusters()
-	}
-	
-	// Fallback to local clusters list
+	// Always return from in-memory list
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -178,16 +165,9 @@ func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 		if err := m.saveClusterConfig(cluster); err != nil {
 			return nil, fmt.Errorf("failed to save cluster config: %w", err)
 		}
-
-		// Save initial status file (reconciler-controlled data)
-		if err := m.saveClusterStatus(cluster); err != nil {
-			return nil, fmt.Errorf("failed to save cluster status: %w", err)
-		}
 		
-		// Request cache update for this cluster
-		if m.stateCache != nil {
-			m.stateCache.RequestUpdate(cluster.Name)
-		}
+		// The controller will create the status.json file when it reconciles
+		// We only manage config.json from the UI side
 	}
 
 	// Add to cluster list only after successful save
@@ -211,11 +191,36 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 			m.clusters[i].Status = models.StatusDeleting
 			m.clusters[i].UpdatedAt = time.Now()
 
-			// Update status to mark as deleting
+			// Update config to mark as deleting - this is the source of truth
+			// The controller will see this and update status accordingly
 			if m.storage != nil {
-				// Only update the status file for deletion
-				if err := m.saveClusterStatus(m.clusters[i]); err != nil {
-					return fmt.Errorf("failed to save deletion status: %w", err)
+				// Load existing config to preserve all fields
+				configKey := fmt.Sprintf("clusters/%s/config.json", m.clusters[i].Name)
+				if s3Backend, ok := m.storage.GetBackend().(*storage.S3Backend); ok {
+					configData, err := s3Backend.GetObject(context.Background(), configKey)
+					if err != nil {
+						return fmt.Errorf("failed to load cluster config: %w", err)
+					}
+					
+					var config storage.ClusterConfig
+					if err := json.Unmarshal(configData, &config); err != nil {
+						return fmt.Errorf("failed to unmarshal config: %w", err)
+					}
+					
+					// Set deletion timestamp in metadata
+					now := time.Now()
+					config.Metadata.DeletionTimestamp = &now
+					config.Metadata.UpdatedAt = now
+					
+					// Save updated config
+					updatedData, err := json.MarshalIndent(config, "", "  ")
+					if err != nil {
+						return fmt.Errorf("failed to marshal updated config: %w", err)
+					}
+					
+					if err := s3Backend.PutObject(context.Background(), configKey, updatedData); err != nil {
+						return fmt.Errorf("failed to save deletion config: %w", err)
+					}
 				}
 			}
 
@@ -293,39 +298,49 @@ func (m *Manager) GetClusterDetails(clusterName string) (*storage.K3sClusterStat
 
 // GetAllClusterStates returns states for all clusters
 func (m *Manager) GetAllClusterStates() map[string]*storage.K3sClusterState {
-	// Use cached states for instant response (no blocking)
-	if m.stateCache != nil {
-		return m.stateCache.GetAllStates()
+	// Load directly from storage
+	if m.storage != nil {
+		states, err := m.storage.LoadAllClusterStates()
+		if err != nil {
+			// Return empty map on error
+			return make(map[string]*storage.K3sClusterState)
+		}
+		
+		// Convert to map
+		result := make(map[string]*storage.K3sClusterState)
+		for _, state := range states {
+			if state != nil && state.Cluster.Name != "" {
+				result[state.Cluster.Name] = state
+			}
+		}
+		return result
 	}
 	
-	// Fallback to empty if no cache
+	// Fallback to empty if no storage
 	return make(map[string]*storage.K3sClusterState)
 }
 
 // SyncFromProvider syncs cluster state from the cloud provider
 func (m *Manager) SyncFromProvider() error {
-	// Infrastructure should already be set up at app initialization
-	// This method now only syncs cluster state without blocking on setup
-	
-	// If we have a state cache, request an immediate refresh
-	if m.stateCache != nil {
-		m.stateCache.RequestFullRefresh()
-		// Return immediately - refresh happens in background
-		return nil
-	}
-	
-	// Fallback to direct load if no cache (shouldn't happen normally)
+	// Load directly from storage
 	if m.storage != nil {
 		states, err := m.storage.LoadAllClusterStates()
 		if err != nil {
 			return fmt.Errorf("failed to load cluster states: %w", err)
 		}
 
-		m.mu.Lock()
-		m.clusters = []models.K3sCluster{}
+		// Build new cluster list first, then atomically swap
+		newClusters := []models.K3sCluster{}
 		for _, state := range states {
-			m.clusters = append(m.clusters, state.Cluster)
+			newClusters = append(newClusters, state.Cluster)
 		}
+		
+		m.mu.Lock()
+		// Only update if we got valid data (preserve existing state on error/empty)
+		if len(newClusters) > 0 || len(states) == 0 {
+			m.clusters = newClusters
+		}
+		m.hasSynced = true
 		m.mu.Unlock()
 	}
 
@@ -336,19 +351,6 @@ func (m *Manager) SyncFromProvider() error {
 
 // RefreshClusterStatus refreshes cluster status from storage
 func (m *Manager) RefreshClusterStatus() {
-	// Mark that we've done at least one sync
-	m.mu.Lock()
-	m.hasSynced = true
-	m.mu.Unlock()
-	
-	// If we have a state cache, it's already refreshing in background
-	if m.stateCache != nil {
-		// Just trigger a refresh request, don't block
-		m.stateCache.RequestFullRefresh()
-		return
-	}
-	
-	// Fallback to direct refresh if no cache
 	// Reload clusters from storage to get latest state
 	if m.storage != nil {
 		states, err := m.storage.LoadAllClusterStates()
@@ -357,15 +359,21 @@ func (m *Manager) RefreshClusterStatus() {
 			return
 		}
 
+		// Build new cluster list first, then atomically swap
+		newClusters := []models.K3sCluster{}
+		for _, state := range states {
+			newClusters = append(newClusters, state.Cluster)
+		}
+
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		// Simply replace the entire list with what's in storage
-		// LoadAllClusterStates returns ALL clusters, so no need to merge
-		m.clusters = []models.K3sCluster{}
-		for _, state := range states {
-			m.clusters = append(m.clusters, state.Cluster)
+		// Only update if we got valid data (preserve existing state on error/empty)
+		// If S3 returns empty but we have existing clusters, keep them temporarily
+		if len(newClusters) > 0 || (len(states) == 0 && m.hasSynced) {
+			m.clusters = newClusters
 		}
+		m.hasSynced = true
 	}
 }
 
@@ -375,49 +383,26 @@ func (m *Manager) saveClusterConfig(cluster models.K3sCluster) error {
 		return nil
 	}
 
-	// Create config-only state
-	configState := &storage.K3sClusterState{
-		Cluster: cluster,
-		// Config doesn't include instance IDs or metadata
-		InstanceIDs: nil,
-		VolumeIDs:   nil,
-		Metadata:    nil,
-	}
+	// Convert to proper config structure (without status)
+	config := storage.ConvertToClusterConfig(cluster)
 
 	// Save to config.json file
 	configKey := fmt.Sprintf("clusters/%s/config.json", cluster.Name)
-	return m.storage.SaveClusterStateToKey(configState, configKey)
+	
+	// We need to marshal this ourselves since SaveClusterStateToKey expects K3sClusterState
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+	
+	// Use the S3 backend directly to save the raw data
+	if s3Backend, ok := m.storage.GetBackend().(*storage.S3Backend); ok {
+		return s3Backend.PutObject(context.Background(), configKey, data)
+	}
+	
+	return fmt.Errorf("storage backend does not support direct object put")
 }
 
-// saveClusterStatus saves cluster status (reconciler-controlled data)
-func (m *Manager) saveClusterStatus(cluster models.K3sCluster) error {
-	if m.storage == nil {
-		return nil
-	}
-
-	// Create status-only state
-	statusState := &storage.K3sClusterState{
-		Cluster: models.K3sCluster{
-			Name:      cluster.Name,
-			Status:    cluster.Status,
-			UpdatedAt: time.Now(),
-		},
-		InstanceIDs: make(map[string]string),
-		VolumeIDs:   make(map[string][]string),
-		Metadata:    make(map[string]interface{}),
-	}
-
-	// Add metadata for reconciliation
-	statusState.Metadata["updated_at"] = time.Now()
-	statusState.Metadata["reconcile_needed"] = true
-	if cluster.Status == models.StatusDeleting {
-		statusState.Metadata["deletion_requested"] = time.Now()
-	}
-
-	// Save to status.json file
-	statusKey := fmt.Sprintf("clusters/%s/status.json", cluster.Name)
-	return m.storage.SaveClusterStateToKey(statusState, statusKey)
-}
 
 
 // HasSyncedOnce returns true if at least one sync has been performed

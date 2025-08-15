@@ -34,6 +34,7 @@ type FormComponent struct {
 	width         int              // Fixed width for the form
 	title         string           // Form title (header)
 	description   string           // Form description (header)
+	isFocused     bool             // Whether the form itself is focused
 }
 
 // NewForm creates a new form component
@@ -57,6 +58,7 @@ func NewForm(id string) *FormComponent {
 		width:          60,  // Default width
 		title:          "",
 		description:    "",
+		isFocused:      true, // Forms start focused by default
 	}
 }
 
@@ -72,6 +74,10 @@ func (f *FormComponent) AddSection(title string) {
 // AddInput adds a text input to the form
 func (f *FormComponent) AddInput(id string, label string, placeholder string, required bool) {
 	input := NewTextInput(f.id + "-" + id)
+	// Add required marker to label if needed
+	if required && label != "" && !strings.HasSuffix(label, " *") {
+		label = label + " *"
+	}
 	input.SetLabel(label)
 	input.SetPlaceholder(placeholder)
 	// Set width (form width minus borders and padding)
@@ -85,6 +91,10 @@ func (f *FormComponent) AddInput(id string, label string, placeholder string, re
 // AddPasswordInput adds a password input to the form
 func (f *FormComponent) AddPasswordInput(id string, label string, placeholder string, required bool) {
 	input := NewPasswordInput(f.id + "-" + id)
+	// Add required marker to label if needed
+	if required && label != "" && !strings.HasSuffix(label, " *") {
+		label = label + " *"
+	}
 	input.SetLabel(label)
 	input.SetPlaceholder(placeholder)
 	input.SetWidth(f.width - 6)
@@ -97,6 +107,10 @@ func (f *FormComponent) AddPasswordInput(id string, label string, placeholder st
 // AddEmailInput adds an email input to the form
 func (f *FormComponent) AddEmailInput(id string, label string, placeholder string, required bool) {
 	input := NewEmailInput(f.id + "-" + id)
+	// Add required marker to label if needed
+	if required && label != "" && !strings.HasSuffix(label, " *") {
+		label = label + " *"
+	}
 	input.SetLabel(label)
 	input.SetPlaceholder(placeholder)
 	input.SetWidth(f.width - 6)
@@ -109,6 +123,10 @@ func (f *FormComponent) AddEmailInput(id string, label string, placeholder strin
 // AddTextArea adds a text area to the form
 func (f *FormComponent) AddTextArea(id string, label string, placeholder string, required bool) {
 	textarea := NewTextArea(f.id + "-" + id)
+	// Add required marker to label if needed
+	if required && label != "" && !strings.HasSuffix(label, " *") {
+		label = label + " *"
+	}
 	textarea.SetLabel(label)
 	textarea.SetPlaceholder(placeholder)
 	textarea.SetDimensions(f.width - 6, 4)
@@ -130,8 +148,22 @@ func (f *FormComponent) AddCheckbox(id string, label string) {
 // AddCheckboxGroup adds a checkbox group to the form
 func (f *FormComponent) AddCheckboxGroup(id string, label string, options map[string]string) {
 	group := NewCheckboxGroup(f.id + "-" + id, label)
-	for optID, optLabel := range options {
-		group.AddCheckbox(optID, optLabel, false)
+	// Sort option keys for deterministic ordering
+	var keys []string
+	for k := range options {
+		keys = append(keys, k)
+	}
+	// Sort keys to ensure consistent order
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[i] > keys[j] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	// Add checkboxes in sorted order
+	for _, optID := range keys {
+		group.AddCheckbox(optID, options[optID], false)
 	}
 	f.components = append(f.components, group)
 	f.labels = append(f.labels, "")
@@ -303,6 +335,8 @@ func (f *FormComponent) View() string {
 	// Calculate actual content width (form width minus border and padding)
 	// Border takes 2 chars (left + right), padding takes 2 chars (left + right)
 	innerWidth := f.width - 4
+	// Reserve space for scrollbar
+	vpWidth := innerWidth - 2
 	
 	// Create professional header
 	var header string
@@ -371,15 +405,8 @@ func (f *FormComponent) View() string {
 			continue
 		}
 		
-		// Add required marker if needed
-		if i < len(f.required) && f.required[i] {
-			if textInput, ok := comp.(*TextInputComponent); ok {
-				label := textInput.label
-				if label != "" && !strings.HasSuffix(label, " *") {
-					textInput.SetLabel(label + " *")
-				}
-			}
-		}
+		// Note: Required markers are now added when components are created,
+		// not during rendering to avoid mutating state
 		
 		allFieldViews = append(allFieldViews, comp.View())
 		
@@ -417,11 +444,12 @@ func (f *FormComponent) View() string {
 	visibleContent := strings.Join(visibleLines, "\n")
 	
 	// Create viewport for content with exact height
+	// Use vpWidth to leave space for scrollbar
 	contentViewport := lipgloss.NewStyle().
-		Width(innerWidth).
+		Width(vpWidth).
 		Height(contentHeight).
 		MaxHeight(contentHeight).
-		MaxWidth(innerWidth).
+		MaxWidth(vpWidth).
 		Render(visibleContent)
 	
 	// Create scrollbar if needed
@@ -449,11 +477,13 @@ func (f *FormComponent) View() string {
 				scrollChar = scrollbarStyle.Render(scrollChar)
 			}
 			
-			// Pad line to full width and add scrollbar
+			// Pad line to exactly vpWidth and add scrollbar
 			lineWidth := lipgloss.Width(lines[i])
-			if lineWidth < innerWidth-2 {
-				lines[i] = lines[i] + strings.Repeat(" ", innerWidth-2-lineWidth) + " " + scrollChar
+			padding := vpWidth - lineWidth
+			if padding > 0 {
+				lines[i] = lines[i] + strings.Repeat(" ", padding)
 			}
+			lines[i] = lines[i] + " " + scrollChar
 		}
 		contentViewport = strings.Join(lines, "\n")
 	}
@@ -493,8 +523,8 @@ func (f *FormComponent) View() string {
 		Width(f.width).
 		BorderForeground(lipgloss.Color("#D1D5DB")) // Light gray border
 	
-	// Highlight border if focused
-	if f.currentIndex < len(f.components) || f.focusOnButtons {
+	// Highlight border if form is focused
+	if f.isFocused {
 		containerStyle = containerStyle.
 			BorderForeground(lipgloss.Color("#2563EB")) // Blue when focused
 	}
@@ -511,14 +541,19 @@ func (f *FormComponent) focusComponent(index int) {
 	f.submitButton.Blur()
 	f.cancelButton.Blur()
 	
-	// Focus the target component
-	if index < len(f.components) {
+	// Focus the target component with nil check
+	if index < len(f.components) && f.components[index] != nil {
 		f.focusComponentAt(f.components[index])
 	}
 }
 
 // Helper to focus different component types
 func (f *FormComponent) focusComponentAt(comp Component) {
+	// Guard against nil
+	if comp == nil {
+		return
+	}
+	
 	switch c := comp.(type) {
 	case *TextInputComponent:
 		c.Focus()
@@ -747,8 +782,19 @@ func (f *FormComponent) Reset() {
 
 // SetDimensions sets the form dimensions
 func (f *FormComponent) SetDimensions(width, height int) {
+	// Guard against minimum dimensions
+	if width < 20 {
+		width = 20
+	}
+	if height < 8 {
+		height = 8
+	}
+	
 	f.width = width
 	f.height = height
+	
+	// Calculate safe field width
+	fieldWidth := max(10, width-6)
 	
 	// Update width of all existing components
 	for _, comp := range f.components {
@@ -757,11 +803,41 @@ func (f *FormComponent) SetDimensions(width, height int) {
 		}
 		switch c := comp.(type) {
 		case *TextInputComponent:
-			c.SetWidth(width - 6)
+			c.SetWidth(fieldWidth)
 		case *TextAreaComponent:
-			c.SetDimensions(width - 6, 4)
+			c.SetDimensions(fieldWidth, 4)
+		// Note: PasswordInput and EmailInput are actually TextInputComponent types
+		// created via NewPasswordInput/NewEmailInput, so they're handled above
 		}
 	}
+}
+
+// Focus sets the form as focused
+func (f *FormComponent) Focus() {
+	f.isFocused = true
+	// Also focus the current component if any
+	if f.currentIndex < len(f.components) && f.components[f.currentIndex] != nil {
+		f.focusComponentAt(f.components[f.currentIndex])
+	} else if f.focusOnButtons {
+		if f.currentIndex == 0 {
+			f.submitButton.Focus()
+		} else {
+			f.cancelButton.Focus()
+		}
+	}
+}
+
+// Blur removes focus from the form
+func (f *FormComponent) Blur() {
+	f.isFocused = false
+	// Blur all components
+	for _, comp := range f.components {
+		if comp != nil {
+			f.blurComponent(comp)
+		}
+	}
+	f.submitButton.Blur()
+	f.cancelButton.Blur()
 }
 
 // SetTitle sets the form title
@@ -794,13 +870,46 @@ func (f *FormComponent) getContentHeight() int {
 	return contentHeight
 }
 
+// getComponentHeight returns estimated height in lines for a component
+func (f *FormComponent) getComponentHeight(comp Component) int {
+	if comp == nil {
+		return 0
+	}
+	
+	// Different component types have different heights
+	switch comp.(type) {
+	case *TextAreaComponent:
+		return 6 // Label + 4 lines of text + spacing
+	case *CheckboxGroupComponent:
+		// Count number of checkboxes
+		// Default to 5 lines for a typical checkbox group
+		return 5
+	case *RadioGroupComponent:
+		// Similar to checkbox group
+		return 5
+	default:
+		// Text inputs, checkboxes, etc.
+		return 3 // Label + input + spacing
+	}
+}
+
 // updateScrollPosition updates scroll position to keep focused field visible
 func (f *FormComponent) updateScrollPosition() {
-	// Calculate approximate line position of current field
-	linesPerField := 3 // Rough estimate
-	currentFieldLine := f.currentIndex * linesPerField
+	// Calculate actual line position of current field
+	currentFieldLine := 0
+	for i := 0; i < f.currentIndex && i < len(f.components); i++ {
+		currentFieldLine += f.getComponentHeight(f.components[i])
+		// Add extra line for section headers
+		if i < len(f.sections) && f.sections[i] != "" {
+			currentFieldLine += 2
+		}
+	}
 	
 	visibleHeight := f.getContentHeight()
+	currentFieldHeight := 3
+	if f.currentIndex < len(f.components) {
+		currentFieldHeight = f.getComponentHeight(f.components[f.currentIndex])
+	}
 	
 	// If current field is above visible area, scroll up
 	if currentFieldLine < f.scrollOffset {
@@ -808,8 +917,8 @@ func (f *FormComponent) updateScrollPosition() {
 	}
 	
 	// If current field is below visible area, scroll down
-	if currentFieldLine >= f.scrollOffset + visibleHeight - 3 {
-		f.scrollOffset = currentFieldLine - visibleHeight + 3
+	if currentFieldLine + currentFieldHeight > f.scrollOffset + visibleHeight {
+		f.scrollOffset = currentFieldLine + currentFieldHeight - visibleHeight
 	}
 	
 	f.constrainScrollOffset()
@@ -821,8 +930,22 @@ func (f *FormComponent) constrainScrollOffset() {
 		f.scrollOffset = 0
 	}
 	
-	// Calculate max scroll based on content
-	totalLines := len(f.components) * 3 // Rough estimate lines per component
+	// Calculate total content height based on actual components
+	totalLines := 0
+	for i, comp := range f.components {
+		totalLines += f.getComponentHeight(comp)
+		// Add extra lines for section headers
+		if i < len(f.sections) && f.sections[i] != "" {
+			totalLines += 2
+		}
+		// Add line for error messages if present
+		if comp != nil {
+			if _, hasError := f.errors[comp.ID()]; hasError {
+				totalLines += 1
+			}
+		}
+	}
+	
 	maxScroll := totalLines - f.getContentHeight()
 	
 	if maxScroll < 0 {

@@ -1,6 +1,8 @@
 package components
 
 import (
+	"strings"
+	
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,12 +35,33 @@ func (h *HelpComponent) Init() tea.Cmd {
 	return nil
 }
 
+// HelpPropsMsg is a message to update help properties
+type HelpPropsMsg struct {
+	Width   *int
+	ShowAll *bool
+	Keys    []key.Binding
+	Style   *lipgloss.Style
+}
+
 // Update handles help messages
 func (h *HelpComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Check for window size changes
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h.help.Width = msg.Width
+	case HelpPropsMsg:
+		// Update properties from message
+		if msg.Width != nil {
+			h.help.Width = *msg.Width
+		}
+		if msg.ShowAll != nil {
+			h.help.ShowAll = *msg.ShowAll
+		}
+		if msg.Keys != nil {
+			h.keys = msg.Keys
+		}
+		if msg.Style != nil {
+			h.style = *msg.Style
+		}
 	}
 	
 	return h, nil
@@ -46,21 +69,7 @@ func (h *HelpComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the help
 func (h *HelpComponent) View() string {
-	// Update properties from props
-	if width, ok := h.props["width"].(int); ok {
-		h.help.Width = width
-	}
-	
-	if showAll, ok := h.props["showAll"].(bool); ok {
-		h.help.ShowAll = showAll
-	}
-	
-	if keys, ok := h.props["keys"].([]key.Binding); ok {
-		h.keys = keys
-	}
-	
-	// Render based on mode
-	view := ""
+	var view string
 	if h.help.ShowAll {
 		// FullHelpView expects [][]key.Binding for grouped keys
 		// Convert single array to grouped array
@@ -69,12 +78,6 @@ func (h *HelpComponent) View() string {
 	} else {
 		view = h.help.ShortHelpView(h.keys)
 	}
-	
-	// Apply custom styling
-	if styleProps, ok := h.props["style"].(lipgloss.Style); ok {
-		return styleProps.Render(view)
-	}
-	
 	return h.style.Render(view)
 }
 
@@ -113,23 +116,61 @@ func (h *HelpComponent) SetStyles(styles help.Styles) {
 	h.help.Styles = styles
 }
 
+// SetStyle sets the wrapper style for the help component
+func (h *HelpComponent) SetStyle(style lipgloss.Style) {
+	h.style = style
+}
+
+// SetShowAll sets whether to show all help items
+func (h *HelpComponent) SetShowAll(showAll bool) {
+	h.help.ShowAll = showAll
+}
+
 // Common key binding helpers
 
-// NewKeyBinding creates a new key binding
-func NewKeyBinding(keys, help string) key.Binding {
+// NewKeyBinding creates a key binding from a combined key string like "up/k" or "pgup/pgdown".
+// It splits on "/", "," and whitespace, normalizes arrow glyphs to Bubble Tea names,
+// and sets a compact help string like "up/k".
+func NewKeyBinding(keysCombined, helpText string) key.Binding {
+	norm := func(s string) string {
+		switch s {
+		case "↑": return "up"
+		case "↓": return "down"
+		case "←": return "left"
+		case "→": return "right"
+		case "pgdn": return "pgdown" // normalize common alias
+		default: return s
+		}
+	}
+
+	// split on / , or whitespace
+	seps := func(r rune) bool { return r == '/' || r == ',' || r == ' ' || r == '\t' }
+	parts := strings.FieldsFunc(keysCombined, seps)
+	keys := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" { continue }
+		keys = append(keys, norm(p))
+	}
+	// Defensive: avoid empty binding
+	if len(keys) == 0 {
+		// Fallback to a non-matchable key to avoid panics but keep help visible
+		keys = []string{"unknown"}
+	}
+	// Use the original combined string as the help label for clarity
 	return key.NewBinding(
-		key.WithKeys(keys),
-		key.WithHelp(keys, help),
+		key.WithKeys(keys...),
+		key.WithHelp(keysCombined, helpText),
 	)
 }
 
 // DefaultKeyBindings returns common default key bindings
 func DefaultKeyBindings() []key.Binding {
 	return []key.Binding{
-		NewKeyBinding("↑/k", "up"),
-		NewKeyBinding("↓/j", "down"),
-		NewKeyBinding("←/h", "left"),
-		NewKeyBinding("→/l", "right"),
+		NewKeyBinding("up/k", "up"),
+		NewKeyBinding("down/j", "down"),
+		NewKeyBinding("left/h", "left"),
+		NewKeyBinding("right/l", "right"),
 		NewKeyBinding("enter", "select"),
 		NewKeyBinding("esc", "back"),
 		NewKeyBinding("q", "quit"),
@@ -140,9 +181,9 @@ func DefaultKeyBindings() []key.Binding {
 // NavigationKeyBindings returns navigation key bindings
 func NavigationKeyBindings() []key.Binding {
 	return []key.Binding{
-		NewKeyBinding("↑/↓", "navigate"),
-		NewKeyBinding("←/→", "switch tabs"),
-		NewKeyBinding("pgup/pgdn", "page up/down"),
+		NewKeyBinding("up/down", "navigate"),
+		NewKeyBinding("left/right", "switch tabs"),
+		NewKeyBinding("pgup/pgdown", "page up/down"),
 		NewKeyBinding("home/end", "first/last"),
 	}
 }

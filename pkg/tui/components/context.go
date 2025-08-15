@@ -131,7 +131,7 @@ func (p *Provider) SetChild(child Component) {
 	p.child = child
 	// Inject context into child
 	if contextAware, ok := child.(ContextAware); ok {
-		contextAware.SetContext(p.context)
+		contextAware.SetContextData(p.context)
 	}
 }
 
@@ -157,8 +157,8 @@ func (p *Provider) View() string {
 
 // ContextAware interface for components that can receive context
 type ContextAware interface {
-	SetContext(*Context)
-	GetContext() *Context
+	SetContextData(*Context)
+	GetContextData() *Context
 }
 
 // Consumer is a component that consumes context values
@@ -176,13 +176,13 @@ func NewConsumer(id string, renderer func(*Context) string) *Consumer {
 	}
 }
 
-// SetContext sets the context
-func (c *Consumer) SetContext(ctx *Context) {
+// SetContextData sets the context
+func (c *Consumer) SetContextData(ctx *Context) {
 	c.context = ctx
 }
 
-// GetContext gets the context
-func (c *Consumer) GetContext() *Context {
+// GetContextData gets the context
+func (c *Consumer) GetContextData() *Context {
 	return c.context
 }
 

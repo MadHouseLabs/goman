@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -61,7 +62,29 @@ func renderMinimalHeader(width int, clusterCount int) string {
 		Bold(true).
 		Padding(0, 1)
 	
-	title := titleStyle.Render("CLUSTERS")
+	title := titleStyle.Render("GOMAN CLUSTERS")
+	
+	// Connection status (hardcoded for now, can be passed as parameter later)
+	statusStyle := lipgloss.NewStyle().Foreground(ColorGreen)
+	region := getEnvOrDefault("AWS_REGION", "ap-south-1")
+	statusText := statusStyle.Render(fmt.Sprintf("● Connected to AWS (%s) • Just synced", region))
+	
+	// Calculate padding for right alignment
+	titleWidth := lipgloss.Width(title)
+	statusWidth := lipgloss.Width(statusText)
+	padding := width - titleWidth - statusWidth - 2
+	if padding < 0 {
+		padding = 1
+	}
+	
+	// Combine title and status
+	headerLine := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		title,
+		strings.Repeat(" ", padding),
+		statusText,
+		" ",
+	)
 	
 	// Title separator - same as form page
 	separator := strings.Repeat("─", width)
@@ -69,7 +92,7 @@ func renderMinimalHeader(width int, clusterCount int) string {
 	
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
-		title,
+		headerLine,
 		sepStyle.Render(separator),
 	)
 }
@@ -265,7 +288,7 @@ func renderMinimalFooter(clusters []models.K3sCluster, width int) string {
 	navStyle := lipgloss.NewStyle().
 		Foreground(ColorGray)
 	
-	navText := "↑/↓: navigate • ↵: details • c: create • d: delete • s: sync • q: quit"
+	navText := "↑↓/jk: navigate • ↵: details • c: create • d: delete • s: sync • r: refresh • q: quit"
 	
 	// Calculate padding for alignment
 	statusWidth := lipgloss.Width(statusText)
@@ -314,4 +337,12 @@ func calculateAge(createdAt time.Time) string {
 	} else {
 		return fmt.Sprintf("%dd", int(duration.Hours()/24))
 	}
+}
+
+// getEnvOrDefault helper function
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

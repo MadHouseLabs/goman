@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -128,8 +127,8 @@ func (s *S3Backend) getKey(path string) string {
 	return path
 }
 
-// putObject uploads data to S3
-func (s *S3Backend) putObject(ctx context.Context, key string, data []byte) error {
+// PutObject uploads data to S3 (exported for direct access)
+func (s *S3Backend) PutObject(ctx context.Context, key string, data []byte) error {
 
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucketName),
@@ -141,8 +140,8 @@ func (s *S3Backend) putObject(ctx context.Context, key string, data []byte) erro
 	return err
 }
 
-// getObject downloads data from S3
-func (s *S3Backend) getObject(ctx context.Context, key string) ([]byte, error) {
+// GetObject downloads data from S3 (exported for direct access)
+func (s *S3Backend) GetObject(ctx context.Context, key string) ([]byte, error) {
 
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucketName),
@@ -211,13 +210,13 @@ func (s *S3Backend) SaveClusters(clusters []models.K3sCluster) error {
 	}
 
 	key := s.getKey("clusters/clusters.json")
-	return s.putObject(context.Background(), key, data)
+	return s.PutObject(context.Background(), key, data)
 }
 
 // LoadClusters loads k3s clusters from S3
 func (s *S3Backend) LoadClusters() ([]models.K3sCluster, error) {
 	key := s.getKey("clusters/clusters.json")
-	data, err := s.getObject(context.Background(), key)
+	data, err := s.GetObject(context.Background(), key)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			return []models.K3sCluster{}, nil
@@ -250,7 +249,7 @@ func (s *S3Backend) SaveClusterState(state *K3sClusterState) error {
 	}
 
 	// Save to S3 - this will trigger Lambda via S3 events
-	if err := s.putObject(context.Background(), key, data); err != nil {
+	if err := s.PutObject(context.Background(), key, data); err != nil {
 		return fmt.Errorf("failed to save cluster state: %w", err)
 	}
 
@@ -270,7 +269,7 @@ func (s *S3Backend) SaveClusterStateToKey(state *K3sClusterState, key string) er
 
 	// Save to S3 with the specified key
 	fullKey := s.getKey(key)
-	if err := s.putObject(context.Background(), fullKey, data); err != nil {
+	if err := s.PutObject(context.Background(), fullKey, data); err != nil {
 		return fmt.Errorf("failed to save cluster state to %s: %w", key, err)
 	}
 
@@ -278,66 +277,141 @@ func (s *S3Backend) SaveClusterStateToKey(state *K3sClusterState, key string) er
 }
 
 // LoadClusterState loads complete cluster state from S3
+// Only supports new format: config.json (metadata + spec) and status.json (status)
 func (s *S3Backend) LoadClusterState(clusterName string) (*K3sClusterState, error) {
 	ctx := context.Background()
 	
 	// Load config file
 	configKey := s.getKey(fmt.Sprintf("clusters/%s/config.json", clusterName))
-	configData, err := s.getObject(ctx, configKey)
+	configData, err := s.GetObject(ctx, configKey)
 	if err != nil {
 		return nil, fmt.Errorf("cluster %s config not found: %w", clusterName, err)
 	}
 	
-	var state K3sClusterState
-	
-	// Load config
-	var configState map[string]interface{}
-	if err := json.Unmarshal(configData, &configState); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	// Parse config with new format only
+	var config ClusterConfig
+	if err := json.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config (expecting new format with apiVersion, kind, metadata, spec): %w", err)
 	}
 	
-	// Extract cluster from config
-	if clusterData, ok := configState["cluster"].(map[string]interface{}); ok {
-		clusterJSON, _ := json.Marshal(clusterData)
-		json.Unmarshal(clusterJSON, &state.Cluster)
+	// Validate new format
+	if config.APIVersion == "" || config.Kind == "" {
+		return nil, fmt.Errorf("invalid config format: missing apiVersion or kind (old format no longer supported)")
 	}
 	
-	// Try to load status (optional - may not exist for new clusters)
+	// Load status file
+	var status *ClusterStatus
 	statusKey := s.getKey(fmt.Sprintf("clusters/%s/status.json", clusterName))
-	statusData, statusErr := s.getObject(ctx, statusKey)
-	
-	if statusErr == nil {
-		var statusState map[string]interface{}
-		if err := json.Unmarshal(statusData, &statusState); err == nil {
-			// Merge status into cluster
-			if statusCluster, ok := statusState["cluster"].(map[string]interface{}); ok {
-				if status, ok := statusCluster["status"].(string); ok {
-					state.Cluster.Status = models.ClusterStatus(status)
-				}
-				if updatedAt, ok := statusCluster["updated_at"].(string); ok {
-					if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
-						state.Cluster.UpdatedAt = t
+	statusData, err := s.GetObject(ctx, statusKey)
+	if err == nil {
+		// First try to unmarshal the raw data to see the structure
+		var rawStatus map[string]interface{}
+		if err := json.Unmarshal(statusData, &rawStatus); err == nil {
+			// Check if this is Lambda's format (with nested cluster and metadata)
+			if clusterData, ok := rawStatus["cluster"].(map[string]interface{}); ok {
+				status = &ClusterStatus{}
+				
+				// Extract status from cluster.status
+				if statusStr, ok := clusterData["status"].(string); ok {
+					// Map string status to ClusterStatus phase
+					switch statusStr {
+					case "running":
+						status.Phase = models.StatusRunning
+					case "creating":
+						status.Phase = models.StatusCreating
+					case "error":
+						status.Phase = models.StatusError
+					case "deleting":
+						status.Phase = models.StatusDeleting
+					case "stopped":
+						status.Phase = models.StatusStopped
+					default:
+						status.Phase = models.StatusCreating
 					}
 				}
-			}
-			
-			// Extract instance IDs and metadata
-			if instanceIDs, ok := statusState["instance_ids"].(map[string]interface{}); ok {
-				state.InstanceIDs = make(map[string]string)
-				for k, v := range instanceIDs {
-					if id, ok := v.(string); ok {
-						state.InstanceIDs[k] = id
+				
+				// Extract metadata
+				if metadata, ok := rawStatus["metadata"].(map[string]interface{}); ok {
+					status.Metadata = metadata
+					if msg, ok := metadata["message"].(string); ok {
+						status.Message = msg
 					}
 				}
-			}
-			
-			if metadata, ok := statusState["metadata"].(map[string]interface{}); ok {
-				state.Metadata = metadata
+				
+				// Extract instance IDs
+				if instanceIDs, ok := rawStatus["instance_ids"].(map[string]interface{}); ok {
+					status.InstanceIDs = make(map[string]string)
+					for k, v := range instanceIDs {
+						if id, ok := v.(string); ok {
+							status.InstanceIDs[k] = id
+						}
+					}
+				}
+				
+				// Extract instance info
+				if instances, ok := rawStatus["instances"].(map[string]interface{}); ok {
+					status.Instances = make(map[string]InstanceInfo)
+					for k, v := range instances {
+						if inst, ok := v.(map[string]interface{}); ok {
+							info := InstanceInfo{}
+							if id, ok := inst["id"].(string); ok {
+								info.ID = id
+							}
+							if ip, ok := inst["private_ip"].(string); ok {
+								info.PrivateIP = ip
+							}
+							if ip, ok := inst["public_ip"].(string); ok {
+								info.PublicIP = ip
+							}
+							if state, ok := inst["state"].(string); ok {
+								info.State = state
+							}
+							if role, ok := inst["role"].(string); ok {
+								info.Role = role
+							}
+							status.Instances[k] = info
+						}
+					}
+				}
+			} else {
+				// Try direct unmarshal for UI-created format
+				status = &ClusterStatus{}
+				if err := json.Unmarshal(statusData, status); err != nil {
+					// Log error but continue without status
+					status = nil
+				}
 			}
 		}
 	}
 	
-	return &state, nil
+	// Convert to K3sCluster
+	cluster := ConvertFromClusterConfig(&config, status)
+	
+	// Build K3sClusterState
+	state := &K3sClusterState{
+		Cluster:     cluster,
+		InstanceIDs: make(map[string]string),
+		VolumeIDs:   make(map[string][]string),
+		Metadata:    make(map[string]interface{}),
+	}
+	
+	// Add status data if available
+	if status != nil {
+		if status.InstanceIDs != nil {
+			state.InstanceIDs = status.InstanceIDs
+		}
+		if status.VolumeIDs != nil {
+			state.VolumeIDs = status.VolumeIDs
+		}
+		state.SecurityGroups = status.SecurityGroups
+		state.VPCID = status.VPCID
+		state.SubnetIDs = status.SubnetIDs
+		if status.Metadata != nil {
+			state.Metadata = status.Metadata
+		}
+	}
+	
+	return state, nil
 }
 
 // LoadAllClusterStates loads all cluster states from S3
@@ -418,13 +492,13 @@ func (s *S3Backend) SaveJob(job *models.Job) error {
 	}
 
 	key := s.getKey(fmt.Sprintf("jobs/%s.json", job.ID))
-	return s.putObject(context.Background(), key, data)
+	return s.PutObject(context.Background(), key, data)
 }
 
 // LoadJob loads a job from S3
 func (s *S3Backend) LoadJob(jobID string) (*models.Job, error) {
 	key := s.getKey(fmt.Sprintf("jobs/%s.json", jobID))
-	data, err := s.getObject(context.Background(), key)
+	data, err := s.GetObject(context.Background(), key)
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +521,7 @@ func (s *S3Backend) LoadAllJobs() ([]*models.Job, error) {
 	var jobs []*models.Job
 	for _, key := range keys {
 		if strings.HasSuffix(key, ".json") {
-			data, err := s.getObject(context.Background(), s.getKey(key))
+			data, err := s.GetObject(context.Background(), s.getKey(key))
 			if err != nil {
 				continue
 			}
@@ -477,13 +551,13 @@ func (s *S3Backend) SaveConfig(config map[string]interface{}) error {
 	}
 
 	key := s.getKey("config.json")
-	return s.putObject(context.Background(), key, data)
+	return s.PutObject(context.Background(), key, data)
 }
 
 // LoadConfig loads application configuration from S3
 func (s *S3Backend) LoadConfig() (map[string]interface{}, error) {
 	key := s.getKey("config.json")
-	data, err := s.getObject(context.Background(), key)
+	data, err := s.GetObject(context.Background(), key)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			// Return default config

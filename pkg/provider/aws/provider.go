@@ -260,6 +260,15 @@ func (p *AWSProvider) Initialize(ctx context.Context) (*provider.InitializeResul
 		result.Resources["dynamodb_table"] = "goman-resource-locks"
 	}
 
+	// Initialize notification service (SNS topics)
+	if err := p.notificationService.Initialize(ctx); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("NotificationService: %v", err))
+	} else {
+		result.NotificationsReady = true
+		result.Resources["sns_topics"] = "goman-cluster-events, goman-reconcile-events, goman-error-events"
+		logger.Printf("SNS topics initialized successfully")
+	}
+
 	// Initialize compute service (SSM instance profile)
 	if computeService, ok := p.computeService.(*ComputeService); ok {
 		if err := computeService.Initialize(ctx); err != nil {

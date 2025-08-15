@@ -155,6 +155,16 @@ func (t *TableComponent) GotoBottom() {
 	t.table.GotoBottom()
 }
 
+// Cursor returns the current cursor position
+func (t *TableComponent) Cursor() int {
+	return t.table.Cursor()
+}
+
+// SetCursor sets the cursor position
+func (t *TableComponent) SetCursor(cursor int) {
+	t.table.SetCursor(cursor)
+}
+
 // NewStyledTable creates a table with custom styling
 func NewStyledTable(id string, columns []table.Column, rows []table.Row) *TableComponent {
 	tc := NewTable(id)
