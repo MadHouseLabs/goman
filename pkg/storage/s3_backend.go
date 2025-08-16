@@ -5,6 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
 	"strings"
 	"gopkg.in/yaml.v3"
 
@@ -114,6 +118,83 @@ func (s *S3Backend) Initialize() error {
 				!strings.Contains(createErr.Error(), "BucketAlreadyOwnedByYou") {
 				return fmt.Errorf("failed to create S3 bucket %s in region %s: %w", s.bucketName, s.region, createErr)
 			}
+		}
+	}
+
+	// Only download K3s binaries during CLI initialization, not in Lambda
+	// Check if we're running in Lambda by looking for AWS_LAMBDA_FUNCTION_NAME
+	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") == "" {
+		// Not in Lambda, safe to download binaries
+		if err := s.setupK3sBinaries(ctx); err != nil {
+			log.Printf("Warning: Failed to setup K3s binaries in S3: %v", err)
+			// Don't fail initialization, binaries can be downloaded later
+		}
+	}
+
+	return nil
+}
+
+// setupK3sBinaries downloads K3s binaries from GitHub and stores them in S3
+func (s *S3Backend) setupK3sBinaries(ctx context.Context) error {
+	// K3s versions to download
+	versions := []string{"v1.33.3+k3s1", "v1.32.6+k3s1", "v1.31.4+k3s1"}
+	architectures := []string{"amd64", "arm64"}
+
+	for _, version := range versions {
+		for _, arch := range architectures {
+			key := fmt.Sprintf("binaries/k3s/%s/k3s-%s", version, arch)
+			
+			// Check if binary already exists in S3
+			_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(s.bucketName),
+				Key:    aws.String(key),
+			})
+			
+			if err == nil {
+				// Binary already exists, skip silently
+				continue
+			}
+
+			// Download from GitHub
+			downloadURL := fmt.Sprintf("https://github.com/k3s-io/k3s/releases/download/%s/k3s", version)
+			if arch != "amd64" {
+				downloadURL = fmt.Sprintf("https://github.com/k3s-io/k3s/releases/download/%s/k3s-%s", version, arch)
+			}
+
+			log.Printf("Downloading K3s %s for %s from GitHub...", version, arch)
+			resp, err := http.Get(downloadURL)
+			if err != nil {
+				log.Printf("Failed to download K3s %s for %s: %v", version, arch, err)
+				continue
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("Failed to download K3s %s for %s: HTTP %d", version, arch, resp.StatusCode)
+				continue
+			}
+
+			// Read the binary
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("Failed to read K3s binary %s for %s: %v", version, arch, err)
+				continue
+			}
+
+			// Upload to S3
+			_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket:      aws.String(s.bucketName),
+				Key:         aws.String(key),
+				Body:        bytes.NewReader(data),
+				ContentType: aws.String("application/octet-stream"),
+			})
+
+			if err != nil {
+				log.Printf("Failed to upload K3s %s for %s to S3: %v", version, arch, err)
+				continue
+			}
+
+			log.Printf("Successfully stored K3s %s for %s in S3", version, arch)
 		}
 	}
 

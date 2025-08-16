@@ -472,15 +472,18 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 		}, nil
 	}
 
-	// All instances are running (IPs are optional), move to running phase
-	log.Printf("[PROVISIONING] All instances for cluster %s are running, transitioning to running phase", resource.Name)
-	resource.Status.Phase = models.ClusterPhaseRunning
-	resource.Status.Message = "Cluster is running"
+	// All instances are running (IPs are optional), move to installing phase
+	log.Printf("[PROVISIONING] All instances for cluster %s are running, transitioning to installing phase", resource.Name)
+	resource.Status.Phase = models.ClusterPhaseInstalling
+	resource.Status.Message = "Installing K3s on instances"
 	resource.Status.ObservedGeneration = resource.Generation
 	now := time.Now()
 	resource.Status.LastReconcileTime = &now
 
-	return &models.ReconcileResult{}, nil
+	return &models.ReconcileResult{
+		Requeue:      true,
+		RequeueAfter: 5 * time.Second,
+	}, nil
 }
 
 // reconcileRunning checks health and handles updates
@@ -816,6 +819,7 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 		
 		clusterState["cluster"] = cluster
 		clusterState["instance_ids"] = status["instance_ids"]
+		clusterState["instances"] = status["instances"]  // Add detailed instance data
 		clusterState["metadata"] = status["metadata"]
 		
 		return r.convertStateToResource(clusterState)
@@ -830,6 +834,7 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 			}
 		}
 		clusterState["instance_ids"] = status["instance_ids"]
+		clusterState["instances"] = status["instances"]  // Add detailed instance data
 		clusterState["metadata"] = status["metadata"]
 		
 		return r.convertStateToResource(clusterState)
@@ -914,11 +919,48 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 	if instanceIDs, ok := state["instance_ids"].(map[string]interface{}); ok {
 		for nodeName, instanceID := range instanceIDs {
 			if id, ok := instanceID.(string); ok && id != "" {
-				resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
+				instance := models.InstanceStatus{
 					InstanceID: id,
 					Name:       nodeName,
-					State:      "running", // Assume running if ID exists
-				})
+					State:      "running", // Default to running if ID exists
+				}
+				
+				// Load detailed instance data if available
+				if instances, ok := state["instances"].(map[string]interface{}); ok {
+					if instData, ok := instances[nodeName].(map[string]interface{}); ok {
+						// Load basic fields
+						if state, ok := instData["state"].(string); ok {
+							instance.State = state
+						}
+						if privateIP, ok := instData["private_ip"].(string); ok {
+							instance.PrivateIP = privateIP
+						}
+						if publicIP, ok := instData["public_ip"].(string); ok {
+							instance.PublicIP = publicIP
+						}
+						if role, ok := instData["role"].(string); ok {
+							instance.Role = role
+						}
+						
+						// Load K3s installation status fields
+						if k3sInstalled, ok := instData["k3s_installed"].(bool); ok {
+							instance.K3sInstalled = k3sInstalled
+						}
+						if k3sVersion, ok := instData["k3s_version"].(string); ok {
+							instance.K3sVersion = k3sVersion
+						}
+						if k3sInstallTime, ok := instData["k3s_install_time"].(string); ok {
+							if t, err := time.Parse(time.RFC3339, k3sInstallTime); err == nil {
+								instance.K3sInstallTime = &t
+							}
+						}
+						if k3sInstallError, ok := instData["k3s_install_error"].(string); ok {
+							instance.K3sInstallError = k3sInstallError
+						}
+					}
+				}
+				
+				resource.Status.Instances = append(resource.Status.Instances, instance)
 			}
 		}
 	}
@@ -956,6 +998,8 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 				switch phase {
 				case models.ClusterPhaseProvisioning:
 					resource.Status.Phase = models.ClusterPhaseProvisioning
+				case models.ClusterPhaseInstalling:
+					resource.Status.Phase = models.ClusterPhaseInstalling
 				case models.ClusterPhaseRunning:
 					resource.Status.Phase = models.ClusterPhaseRunning
 				case models.ClusterPhaseFailed:
@@ -1041,13 +1085,27 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 	instanceStates := make(map[string]interface{})
 	for _, inst := range resource.Status.Instances {
 		instanceIDs[inst.Name] = inst.InstanceID
-		instanceStates[inst.Name] = map[string]interface{}{
+		instanceState := map[string]interface{}{
 			"id":         inst.InstanceID,
 			"state":      inst.State,
 			"private_ip": inst.PrivateIP,
 			"public_ip":  inst.PublicIP,
 			"role":       inst.Role,
 		}
+		
+		// Add K3s installation status fields
+		if inst.K3sInstalled {
+			instanceState["k3s_installed"] = inst.K3sInstalled
+			instanceState["k3s_version"] = inst.K3sVersion
+			if inst.K3sInstallTime != nil {
+				instanceState["k3s_install_time"] = inst.K3sInstallTime.Format(time.RFC3339)
+			}
+		}
+		if inst.K3sInstallError != "" {
+			instanceState["k3s_install_error"] = inst.K3sInstallError
+		}
+		
+		instanceStates[inst.Name] = instanceState
 	}
 	statusState["instance_ids"] = instanceIDs
 	statusState["instances"] = instanceStates

@@ -15,6 +15,8 @@ func (r *Reconciler) reconcileBasedOnPhase(ctx context.Context, resource *models
 		return r.reconcilePending(ctx, resource)
 	case models.ClusterPhaseProvisioning:
 		return r.reconcileProvisioning(ctx, resource)
+	case models.ClusterPhaseInstalling:
+		return r.reconcileInstalling(ctx, resource)
 	case models.ClusterPhaseRunning:
 		return r.reconcileRunning(ctx, resource)
 	case models.ClusterPhaseFailed:

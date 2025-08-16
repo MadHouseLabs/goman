@@ -51,6 +51,10 @@ type ClusterResourceStatus struct {
 	SecurityGroups []string         `json:"securityGroups,omitempty"`
 	Instances      []InstanceStatus `json:"instances,omitempty"`
 	APIEndpoint    string           `json:"apiEndpoint,omitempty"`
+	
+	// K3s cluster status (will be populated after installation)
+	K3sServerURL       string `json:"k3sServerUrl,omitempty"`       // K3s API server URL
+	KubeConfig         string `json:"kubeConfig,omitempty"`         // Base64 encoded kubeconfig
 
 	// Progress tracking
 	Message string `json:"message,omitempty"`
@@ -66,6 +70,12 @@ type InstanceStatus struct {
 	PrivateIP  string    `json:"privateIp,omitempty"`
 	PublicIP   string    `json:"publicIp,omitempty"`
 	LaunchTime time.Time `json:"launchTime"`
+	
+	// K3s installation status
+	K3sInstalled       bool      `json:"k3sInstalled"`
+	K3sVersion         string    `json:"k3sVersion,omitempty"`
+	K3sInstallTime     *time.Time `json:"k3sInstallTime,omitempty"`
+	K3sInstallError    string    `json:"k3sInstallError,omitempty"`
 }
 
 // Condition represents a condition of a resource
@@ -81,6 +91,7 @@ type Condition struct {
 const (
 	ClusterPhasePending      = "Pending"
 	ClusterPhaseProvisioning = "Provisioning"
+	ClusterPhaseInstalling   = "Installing"  // New phase for K3s installation
 	ClusterPhaseRunning      = "Running"
 	ClusterPhaseUpdating     = "Updating"
 	ClusterPhaseTerminating  = "Terminating"

@@ -115,7 +115,7 @@ func NewProvider(profile, region string) (*AWSProvider, error) {
 	p.storageService = NewStorageService(p.s3Client, p.accountID)
 	p.notificationService = NewNotificationService(p.snsClient, p.sqsClient, p.accountID, p.region)
 	p.functionService = NewFunctionService(p.lambdaClient, p.s3Client, p.iamClient, p.accountID, p.region)
-	p.computeService = NewComputeService(p.ec2Client, p.iamClient, p.cfg)
+	p.computeService = NewComputeService(p.ec2Client, p.iamClient, p.cfg, p.accountID)
 
 	return p, nil
 }
@@ -157,6 +157,11 @@ func (p *AWSProvider) Region() string {
 
 // AccountID returns the AWS account ID
 func (p *AWSProvider) AccountID() string {
+	return p.accountID
+}
+
+// GetAccountID returns the AWS account ID (provider interface)
+func (p *AWSProvider) GetAccountID() string {
 	return p.accountID
 }
 

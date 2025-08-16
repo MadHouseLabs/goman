@@ -123,7 +123,7 @@ func NewProviderWithCache(profile, region string) (*AWSProvider, error) {
 	p.storageService = NewStorageService(p.s3Client, p.accountID)
 	p.notificationService = NewNotificationService(p.snsClient, p.sqsClient, p.accountID, p.region)
 	p.functionService = NewFunctionService(p.lambdaClient, p.s3Client, p.iamClient, p.accountID, p.region)
-	p.computeService = NewComputeService(p.ec2Client, p.iamClient, p.cfg)
+	p.computeService = NewComputeService(p.ec2Client, p.iamClient, p.cfg, p.accountID)
 
 	return p, nil
 }

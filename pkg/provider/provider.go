@@ -17,6 +17,7 @@ type Provider interface {
 	// Provider info
 	Name() string
 	Region() string
+	GetAccountID() string
 
 	// Infrastructure management
 	Initialize(ctx context.Context) (*InitializeResult, error)

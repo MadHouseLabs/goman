@@ -25,17 +25,19 @@ type ComputeService struct {
 	iamClient       *iam.Client
 	config          aws.Config
 	instanceProfile string
+	accountID       string
 	regionClients   map[string]*ec2.Client // Cache of region-specific EC2 clients
 }
 
 // NewComputeService creates a new EC2-based compute service
-func NewComputeService(client *ec2.Client, iamClient *iam.Client, cfg aws.Config) *ComputeService {
+func NewComputeService(client *ec2.Client, iamClient *iam.Client, cfg aws.Config, accountID string) *ComputeService {
 	return &ComputeService{
 		client:          client,
 		ssmClient:       ssm.NewFromConfig(cfg),
 		iamClient:       iamClient,
 		config:          cfg,
 		instanceProfile: "goman-ssm-instance-profile",
+		accountID:       accountID,
 		regionClients:   make(map[string]*ec2.Client),
 	}
 }
@@ -123,6 +125,56 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 		})
 		if err != nil {
 			return fmt.Errorf("failed to attach SSM policy: %w", err)
+		}
+
+		// Create and attach custom policy for S3 access to K3s binaries
+		policyName := fmt.Sprintf("goman-instance-s3-policy-%s", s.accountID)
+		bucketName := fmt.Sprintf("goman-%s", s.accountID)
+		
+		// Create the policy document for S3 read access
+		policyDoc := map[string]interface{}{
+			"Version": "2012-10-17",
+			"Statement": []map[string]interface{}{
+				{
+					"Effect": "Allow",
+					"Action": []string{
+						"s3:GetObject",
+						"s3:ListBucket",
+					},
+					"Resource": []string{
+						fmt.Sprintf("arn:aws:s3:::%s/*", bucketName),
+						fmt.Sprintf("arn:aws:s3:::%s", bucketName),
+					},
+				},
+			},
+		}
+
+		policyJSON, err := json.Marshal(policyDoc)
+		if err != nil {
+			return fmt.Errorf("failed to marshal S3 policy: %w", err)
+		}
+
+		// Try to create the policy
+		_, err = s.iamClient.CreatePolicy(ctx, &iam.CreatePolicyInput{
+			PolicyName:     aws.String(policyName),
+			PolicyDocument: aws.String(string(policyJSON)),
+			Description:    aws.String("Policy for goman instances to access K3s binaries in S3"),
+		})
+		if err != nil {
+			// Policy might already exist, that's okay
+			if !strings.Contains(err.Error(), "EntityAlreadyExists") {
+				logger.Printf("Warning: Failed to create S3 policy: %v", err)
+			}
+		}
+
+		// Attach the custom S3 policy
+		_, err = s.iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+			RoleName:  aws.String(roleName),
+			PolicyArn: aws.String(fmt.Sprintf("arn:aws:iam::%s:policy/%s", s.accountID, policyName)),
+		})
+		if err != nil {
+			// Don't fail if policy attachment fails, instances can still work without S3 access
+			logger.Printf("Warning: Failed to attach S3 policy: %v (instances will fallback to GitHub downloads)", err)
 		}
 	}
 
