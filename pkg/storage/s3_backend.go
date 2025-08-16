@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"gopkg.in/yaml.v3"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -134,7 +135,7 @@ func (s *S3Backend) PutObject(ctx context.Context, key string, data []byte) erro
 		Bucket:      aws.String(s.bucketName),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(data),
-		ContentType: aws.String("application/json"),
+		ContentType: aws.String("application/x-yaml"),
 	})
 
 	return err
@@ -164,12 +165,18 @@ func (s *S3Backend) GetObject(ctx context.Context, key string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// deleteObject deletes an object from S3
-func (s *S3Backend) deleteObject(ctx context.Context, key string) error {
-
+// DeleteObject deletes an object from S3 (exported for direct access)
+func (s *S3Backend) DeleteObject(ctx context.Context, key string) error {
+	// Use the key directly - caller should provide the correct path
+	// e.g., "clusters/foo/status.yaml"
+	fullKey := key
+	if s.prefix != "" && !strings.HasPrefix(key, s.prefix) {
+		fullKey = s.prefix + "/" + key
+	}
+	
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucketName),
-		Key:    aws.String(key),
+		Key:    aws.String(fullKey),
 	})
 
 	return err
@@ -240,10 +247,10 @@ func (s *S3Backend) SaveClusterState(state *K3sClusterState) error {
 	}
 
 	// Save individual cluster state file
-	// Format: clusters/{cluster-name}.json
-	key := s.getKey(fmt.Sprintf("clusters/%s.json", state.Cluster.Name))
+	// Format: clusters/{cluster-name}.yaml
+	key := s.getKey(fmt.Sprintf("clusters/%s.yaml", state.Cluster.Name))
 
-	data, err := json.MarshalIndent(state, "", "  ")
+	data, err := yaml.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("failed to marshal cluster state: %w", err)
 	}
@@ -262,7 +269,7 @@ func (s *S3Backend) SaveClusterStateToKey(state *K3sClusterState, key string) er
 		return fmt.Errorf("invalid cluster state")
 	}
 
-	data, err := json.MarshalIndent(state, "", "  ")
+	data, err := yaml.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("failed to marshal cluster state: %w", err)
 	}
@@ -277,21 +284,21 @@ func (s *S3Backend) SaveClusterStateToKey(state *K3sClusterState, key string) er
 }
 
 // LoadClusterState loads complete cluster state from S3
-// Only supports new format: config.json (metadata + spec) and status.json (status)
+// Only supports YAML format
 func (s *S3Backend) LoadClusterState(clusterName string) (*K3sClusterState, error) {
 	ctx := context.Background()
 	
-	// Load config file
-	configKey := s.getKey(fmt.Sprintf("clusters/%s/config.json", clusterName))
+	// Load config file (YAML)
+	configKey := s.getKey(fmt.Sprintf("clusters/%s/config.yaml", clusterName))
 	configData, err := s.GetObject(ctx, configKey)
 	if err != nil {
 		return nil, fmt.Errorf("cluster %s config not found: %w", clusterName, err)
 	}
 	
-	// Parse config with new format only
+	// Parse config as YAML
 	var config ClusterConfig
-	if err := json.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config (expecting new format with apiVersion, kind, metadata, spec): %w", err)
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 	
 	// Validate new format
@@ -299,14 +306,14 @@ func (s *S3Backend) LoadClusterState(clusterName string) (*K3sClusterState, erro
 		return nil, fmt.Errorf("invalid config format: missing apiVersion or kind (old format no longer supported)")
 	}
 	
-	// Load status file
+	// Load status file (YAML)
 	var status *ClusterStatus
-	statusKey := s.getKey(fmt.Sprintf("clusters/%s/status.json", clusterName))
+	statusKey := s.getKey(fmt.Sprintf("clusters/%s/status.yaml", clusterName))
 	statusData, err := s.GetObject(ctx, statusKey)
 	if err == nil {
-		// First try to unmarshal the raw data to see the structure
+		// Try to unmarshal the raw data to see the structure
 		var rawStatus map[string]interface{}
-		if err := json.Unmarshal(statusData, &rawStatus); err == nil {
+		if err := yaml.Unmarshal(statusData, &rawStatus); err == nil {
 			// Check if this is Lambda's format (with nested cluster and metadata)
 			if clusterData, ok := rawStatus["cluster"].(map[string]interface{}); ok {
 				status = &ClusterStatus{}
@@ -328,6 +335,9 @@ func (s *S3Backend) LoadClusterState(clusterName string) (*K3sClusterState, erro
 					default:
 						status.Phase = models.StatusCreating
 					}
+				} else {
+					// No status in cluster data, default to creating
+					status.Phase = models.StatusCreating
 				}
 				
 				// Extract metadata
@@ -376,7 +386,7 @@ func (s *S3Backend) LoadClusterState(clusterName string) (*K3sClusterState, erro
 			} else {
 				// Try direct unmarshal for UI-created format
 				status = &ClusterStatus{}
-				if err := json.Unmarshal(statusData, status); err != nil {
+				if err := yaml.Unmarshal(statusData, status); err != nil {
 					// Log error but continue without status
 					status = nil
 				}
@@ -415,7 +425,7 @@ func (s *S3Backend) LoadClusterState(clusterName string) (*K3sClusterState, erro
 }
 
 // LoadAllClusterStates loads all cluster states from S3
-// Only supports new format: clusters/{name}/config.json + status.json
+// Only supports YAML format: clusters/{name}/config.yaml + status.yaml
 func (s *S3Backend) LoadAllClusterStates() ([]*K3sClusterState, error) {
 	// List all cluster files
 	keys, err := s.listObjects(context.Background(), "clusters/")
@@ -427,12 +437,12 @@ func (s *S3Backend) LoadAllClusterStates() ([]*K3sClusterState, error) {
 	processedClusters := make(map[string]bool)
 	
 	for _, key := range keys {
-		// Only process config.json files
-		if !strings.HasSuffix(key, "/config.json") {
+		// Only process config.yaml files
+		if !strings.HasSuffix(key, "/config.yaml") {
 			continue
 		}
 		
-		// Extract cluster name from key: clusters/{name}/config.json
+		// Extract cluster name from key: clusters/{name}/config.yaml
 		parts := strings.Split(key, "/")
 		if len(parts) < 3 {
 			continue
@@ -459,18 +469,18 @@ func (s *S3Backend) LoadAllClusterStates() ([]*K3sClusterState, error) {
 }
 
 // DeleteClusterState deletes cluster state from S3
-// Only deletes new format files
+// Only deletes YAML format files
 func (s *S3Backend) DeleteClusterState(clusterName string) error {
 	ctx := context.Background()
 
 	// Delete config and status files
-	configKey := s.getKey(fmt.Sprintf("clusters/%s/config.json", clusterName))
+	configKey := s.getKey(fmt.Sprintf("clusters/%s/config.yaml", clusterName))
 	s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(configKey),
 	})
 	
-	statusKey := s.getKey(fmt.Sprintf("clusters/%s/status.json", clusterName))
+	statusKey := s.getKey(fmt.Sprintf("clusters/%s/status.yaml", clusterName))
 	s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(statusKey),
@@ -539,8 +549,8 @@ func (s *S3Backend) LoadAllJobs() ([]*models.Job, error) {
 
 // DeleteJob deletes a job from S3
 func (s *S3Backend) DeleteJob(jobID string) error {
-	key := s.getKey(fmt.Sprintf("jobs/%s.json", jobID))
-	return s.deleteObject(context.Background(), key)
+	key := fmt.Sprintf("jobs/%s.json", jobID)
+	return s.DeleteObject(context.Background(), key)
 }
 
 // SaveConfig saves application configuration to S3

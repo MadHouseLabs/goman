@@ -117,8 +117,8 @@ func (r *Reconciler) finalizeClusterDeletion(ctx context.Context, resource *mode
 	}
 
 	// Delete the resource from storage (both config and status files)
-	configKey := fmt.Sprintf("clusters/%s/config.json", resource.Name)
-	statusKey := fmt.Sprintf("clusters/%s/status.json", resource.Name)
+	configKey := fmt.Sprintf("clusters/%s/config.yaml", resource.Name)
+	statusKey := fmt.Sprintf("clusters/%s/status.yaml", resource.Name)
 	
 	// Delete config file
 	log.Printf("[DELETE] Deleting config file: %s", configKey)

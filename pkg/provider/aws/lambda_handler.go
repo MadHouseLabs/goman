@@ -234,15 +234,15 @@ type S3EventRecord struct {
 
 // extractClusterName extracts cluster name from S3 object key
 func extractClusterName(key string) string {
-	// Only handle new format: clusters/{cluster-name}/config.json or clusters/{cluster-name}/status.json
+	// Only handle new format: clusters/{cluster-name}/config.yaml or clusters/{cluster-name}/status.yaml
 	
 	if strings.HasPrefix(key, "clusters/") {
 		path := key[len("clusters/"):]
 		
-		// Check for new format: {cluster-name}/config.json or {cluster-name}/status.json
+		// Check for new format: {cluster-name}/config.yaml or {cluster-name}/status.yaml
 		if strings.Contains(path, "/") {
 			parts := strings.Split(path, "/")
-			if len(parts) == 2 && (parts[1] == "config.json" || parts[1] == "status.json") {
+			if len(parts) == 2 && (parts[1] == "config.yaml" || parts[1] == "status.yaml") {
 				return parts[0]
 			}
 		}
@@ -286,7 +286,7 @@ func (h *LambdaHandler) scheduleRequeue(ctx context.Context, clusterName string,
 	}
 
 	// First check if the cluster still exists before scheduling requeue
-	configKey := fmt.Sprintf("clusters/%s/config.json", clusterName)
+	configKey := fmt.Sprintf("clusters/%s/config.yaml", clusterName)
 	_, err := h.provider.GetStorageService().GetObject(ctx, configKey)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "NoSuchKey") {

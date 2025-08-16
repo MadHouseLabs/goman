@@ -44,6 +44,25 @@ task clean           # Remove build artifacts
 ./goman uninit       # Hidden command to cleanup AWS resources
 ```
 
+## Important Restrictions
+
+### Immutable Fields
+The following cluster fields **cannot be changed** after creation:
+- **name**: Cluster name is immutable as it's used as the unique identifier
+- **mode**: Cluster mode (developer/ha) cannot be changed as it determines the number of master nodes (1 for developer, 3 for HA)
+
+When attempting to change these fields:
+- The UI will show a validation error as a comment at the top of the vim editor
+- The changes will not be saved to storage
+- Users must create a new cluster if they need a different mode
+
+### Mutable Fields
+The following fields **can be changed** after creation:
+- **description**: Cluster description
+- **region**: AWS region (Note: changing region will provision new instances in the new region)
+- **instanceType**: EC2 instance type (will trigger automatic resize of existing instances)
+- **k3sVersion**: K3s version (for upgrades)
+
 ## Architecture and Code Organization
 
 ### Core Provider Abstraction Pattern

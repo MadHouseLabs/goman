@@ -5,59 +5,60 @@ import (
 	"github.com/madhouselabs/goman/pkg/models"
 )
 
-// ClusterConfig represents the desired state (spec) stored in config.json
+// ClusterConfig represents the desired state (spec) stored in config.yaml
 type ClusterConfig struct {
-	APIVersion string                   `json:"apiVersion"`
-	Kind       string                   `json:"kind"`
-	Metadata   ClusterMetadata          `json:"metadata"`
-	Spec       ClusterSpec              `json:"spec"`
+	APIVersion string                   `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string                   `json:"kind" yaml:"kind"`
+	Metadata   ClusterMetadata          `json:"metadata" yaml:"metadata"`
+	Spec       ClusterSpec              `json:"spec" yaml:"spec"`
 }
 
 // ClusterMetadata contains cluster metadata
 type ClusterMetadata struct {
-	Name               string            `json:"name"`
-	ID                 string            `json:"id"`
-	Labels             map[string]string `json:"labels,omitempty"`
-	Annotations        map[string]string `json:"annotations,omitempty"`
-	CreatedAt          time.Time         `json:"created_at"`
-	UpdatedAt          time.Time         `json:"updated_at"`
-	DeletionTimestamp  *time.Time        `json:"deletionTimestamp,omitempty"`
+	Name               string            `json:"name" yaml:"name"`
+	ID                 string            `json:"id" yaml:"id"`
+	Labels             map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Annotations        map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty"`
+	CreatedAt          time.Time         `json:"created_at" yaml:"createdAt"`
+	UpdatedAt          time.Time         `json:"updated_at" yaml:"updatedAt"`
+	DeletionTimestamp  *time.Time        `json:"deletionTimestamp,omitempty" yaml:"deletionTimestamp,omitempty"`
 }
 
 // ClusterSpec contains the desired cluster specification
 type ClusterSpec struct {
-	Mode           models.ClusterMode `json:"mode"`
-	Region         string             `json:"region"`
-	InstanceType   string             `json:"instance_type"`
-	K3sVersion     string             `json:"k3s_version"`
-	KubeVersion    string             `json:"kube_version"`
-	MasterNodes    []models.Node   `json:"master_nodes"`
-	WorkerNodes    []models.Node   `json:"worker_nodes"`
-	NetworkCIDR    string             `json:"network_cidr"`
-	ServiceCIDR    string             `json:"service_cidr"`
-	ClusterDNS     string             `json:"cluster_dns"`
-	Features       models.K3sFeatures    `json:"features"`
-	SSHKeyPath     string             `json:"ssh_key_path"`
-	KubeConfigPath string             `json:"kubeconfig_path"`
-	Tags           []string           `json:"tags,omitempty"`
+	Description    string             `json:"description" yaml:"description"`
+	Mode           models.ClusterMode `json:"mode" yaml:"mode"`
+	Region         string             `json:"region" yaml:"region"`
+	InstanceType   string             `json:"instance_type" yaml:"instanceType"`
+	K3sVersion     string             `json:"k3s_version" yaml:"k3sVersion"`
+	KubeVersion    string             `json:"kube_version" yaml:"kubeVersion"`
+	MasterNodes    []models.Node   `json:"master_nodes" yaml:"masterNodes"`
+	WorkerNodes    []models.Node   `json:"worker_nodes" yaml:"workerNodes"`
+	NetworkCIDR    string             `json:"network_cidr" yaml:"networkCIDR"`
+	ServiceCIDR    string             `json:"service_cidr" yaml:"serviceCIDR"`
+	ClusterDNS     string             `json:"cluster_dns" yaml:"clusterDNS"`
+	Features       models.K3sFeatures    `json:"features" yaml:"features"`
+	SSHKeyPath     string             `json:"ssh_key_path" yaml:"sshKeyPath"`
+	KubeConfigPath string             `json:"kubeconfig_path" yaml:"kubeConfigPath"`
+	Tags           []string           `json:"tags,omitempty" yaml:"tags,omitempty"`
 }
 
-// ClusterStatus represents the observed state stored in status.json
+// ClusterStatus represents the observed state stored in status.yaml
 type ClusterStatus struct {
-	Phase         models.ClusterStatus   `json:"phase"`
-	Message       string                 `json:"message,omitempty"`
-	Reason        string                 `json:"reason,omitempty"`
-	UpdatedAt     time.Time              `json:"updated_at"`
-	Conditions    []ClusterCondition     `json:"conditions,omitempty"`
-	InstanceIDs   map[string]string      `json:"instance_ids,omitempty"`
-	Instances     map[string]InstanceInfo `json:"instances,omitempty"`
-	VolumeIDs     map[string][]string    `json:"volume_ids,omitempty"`
-	SecurityGroups []string              `json:"security_groups,omitempty"`
-	VPCID         string                 `json:"vpc_id,omitempty"`
-	SubnetIDs     []string               `json:"subnet_ids,omitempty"`
-	APIEndpoint   string                 `json:"api_endpoint,omitempty"`
-	ClusterToken  string                 `json:"cluster_token,omitempty"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	Phase         models.ClusterStatus   `json:"phase" yaml:"phase"`
+	Message       string                 `json:"message,omitempty" yaml:"message,omitempty"`
+	Reason        string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
+	UpdatedAt     time.Time              `json:"updated_at" yaml:"updatedAt"`
+	Conditions    []ClusterCondition     `json:"conditions,omitempty" yaml:"conditions,omitempty"`
+	InstanceIDs   map[string]string      `json:"instance_ids,omitempty" yaml:"instanceIDs,omitempty"`
+	Instances     map[string]InstanceInfo `json:"instances,omitempty" yaml:"instances,omitempty"`
+	VolumeIDs     map[string][]string    `json:"volume_ids,omitempty" yaml:"volumeIDs,omitempty"`
+	SecurityGroups []string              `json:"security_groups,omitempty" yaml:"securityGroups,omitempty"`
+	VPCID         string                 `json:"vpc_id,omitempty" yaml:"vpcID,omitempty"`
+	SubnetIDs     []string               `json:"subnet_ids,omitempty" yaml:"subnetIDs,omitempty"`
+	APIEndpoint   string                 `json:"api_endpoint,omitempty" yaml:"apiEndpoint,omitempty"`
+	ClusterToken  string                 `json:"cluster_token,omitempty" yaml:"clusterToken,omitempty"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 // InstanceInfo contains EC2 instance information
@@ -94,6 +95,7 @@ func ConvertToClusterConfig(cluster models.K3sCluster) *ClusterConfig {
 			},
 		},
 		Spec: ClusterSpec{
+			Description:    cluster.Description,
 			Mode:           cluster.Mode,
 			Region:         cluster.Region,
 			InstanceType:   cluster.InstanceType,
@@ -117,6 +119,7 @@ func ConvertFromClusterConfig(config *ClusterConfig, status *ClusterStatus) mode
 	cluster := models.K3sCluster{
 		ID:             config.Metadata.ID,
 		Name:           config.Metadata.Name,
+		Description:    config.Spec.Description,
 		Mode:           config.Spec.Mode,
 		Region:         config.Spec.Region,
 		InstanceType:   config.Spec.InstanceType,
@@ -135,11 +138,38 @@ func ConvertFromClusterConfig(config *ClusterConfig, status *ClusterStatus) mode
 		UpdatedAt:      config.Metadata.UpdatedAt,
 	}
 
-	// Add status if available
-	if status != nil {
-		cluster.Status = status.Phase
-		cluster.APIEndpoint = status.APIEndpoint
-		cluster.ClusterToken = status.ClusterToken
+	// Check if cluster is marked for deletion
+	if config.Metadata.DeletionTimestamp != nil {
+		// Cluster has been marked for deletion
+		cluster.Status = models.StatusDeleting
+	} else if status != nil {
+		// Check if this status is from an old deletion that's still being processed
+		// If the status has deletion_requested in metadata but config doesn't have DeletionTimestamp,
+		// this is a stale status from a previous cluster with the same name
+		if status.Metadata != nil {
+			if _, hasDeletionRequested := status.Metadata["deletion_requested"]; hasDeletionRequested {
+				// This is a stale status from a deleted cluster, ignore it
+				cluster.Status = models.StatusCreating
+			} else {
+				// Add status if available and valid
+				cluster.Status = status.Phase
+				cluster.APIEndpoint = status.APIEndpoint
+				cluster.ClusterToken = status.ClusterToken
+			}
+		} else {
+			// Status exists but no metadata - use the phase if it's valid
+			if status.Phase != "" {
+				cluster.Status = status.Phase
+				cluster.APIEndpoint = status.APIEndpoint
+				cluster.ClusterToken = status.ClusterToken
+			} else {
+				// Status exists but phase is empty, default to creating
+				cluster.Status = models.StatusCreating
+			}
+		}
+	} else {
+		// Default status when no status file exists yet
+		cluster.Status = models.StatusCreating
 	}
 
 	// Calculate totals

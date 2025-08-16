@@ -2,11 +2,11 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"time"
+	"gopkg.in/yaml.v3"
 
 	"github.com/madhouselabs/goman/pkg/config"
 	"github.com/madhouselabs/goman/pkg/models"
@@ -503,6 +503,15 @@ func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.Clus
 		resource.Status.ObservedGeneration = resource.Generation
 	}
 
+	// Check if instance type needs to be changed
+	needsResize, err := r.checkInstanceTypeChanges(ctx, resource)
+	if err != nil {
+		log.Printf("Error checking instance type changes: %v", err)
+	} else if needsResize {
+		log.Printf("[RESIZE] Instance type change detected for cluster %s", resource.Name)
+		return r.resizeInstances(ctx, resource)
+	}
+
 	// Update instance states from cloud provider to keep IP addresses current
 	computeService := r.provider.GetComputeService()
 	filters := map[string]string{
@@ -554,6 +563,173 @@ func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.Clus
 
 // reconcileFailed moved to phases.go
 
+// checkInstanceTypeChanges checks if any instances need resizing
+func (r *Reconciler) checkInstanceTypeChanges(ctx context.Context, resource *models.ClusterResource) (bool, error) {
+	computeService := r.provider.GetComputeService()
+	
+	// Get current instances
+	filters := map[string]string{
+		"tag:ClusterName":     resource.Name,
+		"instance-state-name": "running,stopped",
+	}
+	
+	if resource.Spec.Region != "" {
+		filters["region"] = resource.Spec.Region
+	}
+	
+	instances, err := computeService.ListInstances(ctx, filters)
+	if err != nil {
+		return false, fmt.Errorf("failed to list instances: %w", err)
+	}
+	
+	// Check if any instance has different type than desired
+	desiredType := resource.Spec.InstanceType
+	if desiredType == "" {
+		desiredType = "t3.medium" // default
+	}
+	
+	for _, inst := range instances {
+		if inst.InstanceType != desiredType {
+			log.Printf("[RESIZE] Instance %s has type %s, but desired is %s", inst.Name, inst.InstanceType, desiredType)
+			return true, nil
+		}
+	}
+	
+	return false, nil
+}
+
+// resizeInstances handles resizing instances to new instance type
+func (r *Reconciler) resizeInstances(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
+	computeService := r.provider.GetComputeService()
+	
+	// Update status
+	resource.Status.Phase = models.ClusterPhaseUpdating
+	resource.Status.Message = fmt.Sprintf("Resizing instances to %s", resource.Spec.InstanceType)
+	
+	// Save status to notify UI
+	if err := r.saveClusterResource(ctx, resource); err != nil {
+		log.Printf("Failed to save status: %v", err)
+	}
+	
+	// Get instances that need resizing
+	filters := map[string]string{
+		"tag:ClusterName":     resource.Name,
+		"instance-state-name": "running,stopped",
+	}
+	
+	if resource.Spec.Region != "" {
+		filters["region"] = resource.Spec.Region
+	}
+	
+	instances, err := computeService.ListInstances(ctx, filters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list instances: %w", err)
+	}
+	
+	desiredType := resource.Spec.InstanceType
+	if desiredType == "" {
+		desiredType = "t3.medium"
+	}
+	
+	// Process each instance that needs resizing
+	var resizeErrors []string
+	resizedCount := 0
+	
+	for _, inst := range instances {
+		if inst.InstanceType == desiredType {
+			continue // Already correct type
+		}
+		
+		log.Printf("[RESIZE] Resizing instance %s from %s to %s", inst.Name, inst.InstanceType, desiredType)
+		
+		// Stop instance if running
+		if inst.State == "running" {
+			log.Printf("[RESIZE] Stopping instance %s", inst.Name)
+			if err := computeService.StopInstance(ctx, inst.ID); err != nil {
+				resizeErrors = append(resizeErrors, fmt.Sprintf("%s: failed to stop: %v", inst.Name, err))
+				continue
+			}
+			
+			// Wait for instance to stop (with timeout)
+			stopCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			err := r.waitForInstanceState(stopCtx, inst.ID, "stopped")
+			cancel()
+			
+			if err != nil {
+				resizeErrors = append(resizeErrors, fmt.Sprintf("%s: timeout waiting for stop: %v", inst.Name, err))
+				continue
+			}
+		}
+		
+		// Modify instance type
+		log.Printf("[RESIZE] Modifying instance %s type to %s", inst.Name, desiredType)
+		if err := computeService.ModifyInstanceType(ctx, inst.ID, desiredType); err != nil {
+			resizeErrors = append(resizeErrors, fmt.Sprintf("%s: failed to modify type: %v", inst.Name, err))
+			continue
+		}
+		
+		// Start instance
+		log.Printf("[RESIZE] Starting instance %s", inst.Name)
+		if err := computeService.StartInstance(ctx, inst.ID); err != nil {
+			resizeErrors = append(resizeErrors, fmt.Sprintf("%s: failed to start: %v", inst.Name, err))
+			continue
+		}
+		
+		resizedCount++
+		
+		// Update status with progress
+		resource.Status.Message = fmt.Sprintf("Resized %d/%d instances to %s", resizedCount, len(instances), desiredType)
+		if err := r.saveClusterResource(ctx, resource); err != nil {
+			log.Printf("Failed to save status: %v", err)
+		}
+	}
+	
+	// Check results
+	if len(resizeErrors) > 0 {
+		resource.Status.Phase = models.ClusterPhaseFailed
+		resource.Status.Message = fmt.Sprintf("Resize failed: %s", strings.Join(resizeErrors, "; "))
+		return &models.ReconcileResult{
+			Requeue:      true,
+			RequeueAfter: 30 * time.Second,
+		}, fmt.Errorf("resize errors: %v", resizeErrors)
+	}
+	
+	// All instances resized successfully
+	log.Printf("[RESIZE] Successfully resized %d instances for cluster %s", resizedCount, resource.Name)
+	resource.Status.Phase = models.ClusterPhaseRunning
+	resource.Status.Message = fmt.Sprintf("All instances resized to %s", desiredType)
+	
+	return &models.ReconcileResult{
+		Requeue:      true,
+		RequeueAfter: 10 * time.Second,
+	}, nil
+}
+
+// waitForInstanceState waits for an instance to reach the desired state
+func (r *Reconciler) waitForInstanceState(ctx context.Context, instanceID, desiredState string) error {
+	computeService := r.provider.GetComputeService()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for instance %s to reach state %s", instanceID, desiredState)
+		case <-time.After(5 * time.Second):
+			// Check instance state
+			filters := map[string]string{
+				"instance-id": instanceID,
+			}
+			instances, err := computeService.ListInstances(ctx, filters)
+			if err != nil {
+				return fmt.Errorf("failed to get instance state: %w", err)
+			}
+			
+			if len(instances) > 0 && instances[0].State == desiredState {
+				return nil // Reached desired state
+			}
+		}
+	}
+}
+
 // loadClusterResource loads cluster resource from storage with timeout
 func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*models.ClusterResource, error) {
 	// Create a timeout context for loading (30 seconds)
@@ -561,8 +737,8 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 	defer cancel()
 
 	// Load from new format only: separate config and status files
-	configKey := fmt.Sprintf("clusters/%s/config.json", name)
-	statusKey := fmt.Sprintf("clusters/%s/status.json", name)
+	configKey := fmt.Sprintf("clusters/%s/config.yaml", name)
+	statusKey := fmt.Sprintf("clusters/%s/status.yaml", name)
 
 	// Load config (required)
 	configData, err := r.provider.GetStorageService().GetObject(loadCtx, configKey)
@@ -571,7 +747,7 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 	}
 
 	var config map[string]interface{}
-	if err := json.Unmarshal(configData, &config); err != nil {
+	if err := yaml.Unmarshal(configData, &config); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal cluster config: %w", err)
 	}
 
@@ -579,7 +755,7 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 	var status map[string]interface{}
 	statusData, err := r.provider.GetStorageService().GetObject(loadCtx, statusKey)
 	if err == nil {
-		if err := json.Unmarshal(statusData, &status); err != nil {
+		if err := yaml.Unmarshal(statusData, &status); err != nil {
 			log.Printf("Warning: Failed to unmarshal status for %s: %v", name, err)
 			status = make(map[string]interface{})
 		}
@@ -616,16 +792,21 @@ func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*mod
 			}
 		}
 		
-		// Extract spec
+		// Extract spec (using camelCase from YAML)
 		if spec, ok := config["spec"].(map[string]interface{}); ok {
 			cluster["mode"] = spec["mode"]
 			cluster["region"] = spec["region"]
-			cluster["instance_type"] = spec["instance_type"]
-			cluster["k3s_version"] = spec["k3s_version"]
-			cluster["master_nodes"] = spec["master_nodes"]
-			cluster["worker_nodes"] = spec["worker_nodes"]
-			cluster["network_cidr"] = spec["network_cidr"]
-			cluster["service_cidr"] = spec["service_cidr"]
+			cluster["instance_type"] = spec["instanceType"]
+			cluster["k3s_version"] = spec["k3sVersion"]
+			cluster["master_nodes"] = spec["masterNodes"]
+			cluster["worker_nodes"] = spec["workerNodes"]
+			cluster["network_cidr"] = spec["networkCIDR"]
+			cluster["service_cidr"] = spec["serviceCIDR"]
+			cluster["cluster_dns"] = spec["clusterDNS"]
+			cluster["description"] = spec["description"]
+			
+			// Debug logging
+			log.Printf("[CONFIG] Loaded instanceType: %v", spec["instanceType"])
 		}
 		
 		// Add status from status file
@@ -698,6 +879,9 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 	// Check for instance_type in cluster config
 	if instanceType := getStringFromMap(cluster, "instance_type"); instanceType != "" {
 		resource.Spec.InstanceType = instanceType
+		log.Printf("[CONFIG] Set resource InstanceType to: %s", instanceType)
+	} else {
+		log.Printf("[CONFIG] No instance_type found in cluster config, using default: %s", resource.Spec.InstanceType)
 	}
 
 	// Extract master nodes to get node count and possibly override instance type
@@ -829,14 +1013,14 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 	defer cancel()
 
 	// IMPORTANT: Only save status, never modify config
-	statusKey := fmt.Sprintf("clusters/%s/status.json", resource.Name)
+	statusKey := fmt.Sprintf("clusters/%s/status.yaml", resource.Name)
 	
 	// First, load existing status to preserve metadata like retry counts
 	var existingMetadata map[string]interface{}
 	existingStatusData, err := r.provider.GetStorageService().GetObject(ctx, statusKey)
 	if err == nil {
 		var existingStatus map[string]interface{}
-		if json.Unmarshal(existingStatusData, &existingStatus) == nil {
+		if yaml.Unmarshal(existingStatusData, &existingStatus) == nil {
 			if metadata, ok := existingStatus["metadata"].(map[string]interface{}); ok {
 				existingMetadata = metadata
 			}
@@ -902,7 +1086,7 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 	statusState["metadata"] = metadata
 
 	// Save status file
-	statusData, err := json.MarshalIndent(statusState, "", "  ")
+	statusData, err := yaml.Marshal(statusState)
 	if err != nil {
 		return fmt.Errorf("failed to marshal status: %w", err)
 	}

@@ -78,6 +78,7 @@ type ComputeService interface {
 	ListInstances(ctx context.Context, filters map[string]string) ([]*Instance, error)
 	StartInstance(ctx context.Context, instanceID string) error
 	StopInstance(ctx context.Context, instanceID string) error
+	ModifyInstanceType(ctx context.Context, instanceID string, instanceType string) error
 
 	// RunCommand executes a command on instances using cloud-native methods (e.g., SSM for AWS)
 	RunCommand(ctx context.Context, instanceIDs []string, command string) (*CommandResult, error)

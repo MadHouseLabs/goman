@@ -412,6 +412,8 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 				"Action": []string{
 					"ec2:RunInstances",
 					"ec2:TerminateInstances",
+					"ec2:StopInstances",
+					"ec2:StartInstances",
 					"ec2:CreateSecurityGroup",
 					"ec2:AuthorizeSecurityGroupIngress",
 					"ec2:DeleteSecurityGroup",

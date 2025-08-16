@@ -465,6 +465,39 @@ func (s *ComputeService) StopInstance(ctx context.Context, instanceID string) er
 	return nil
 }
 
+// ModifyInstanceType changes the instance type of a stopped instance
+func (s *ComputeService) ModifyInstanceType(ctx context.Context, instanceID string, instanceType string) error {
+	// Try to find which region the instance is in
+	ec2Client := s.client
+
+	// Try to find the instance in cached regions
+	for region, client := range s.regionClients {
+		result, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+			InstanceIds: []string{instanceID},
+		})
+		if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+			ec2Client = client
+			logger.Printf("Found instance %s in region %s for modification", instanceID, region)
+			break
+		}
+	}
+
+	// Modify the instance attribute
+	_, err := ec2Client.ModifyInstanceAttribute(ctx, &ec2.ModifyInstanceAttributeInput{
+		InstanceId: aws.String(instanceID),
+		InstanceType: &types.AttributeValue{
+			Value: aws.String(instanceType),
+		},
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to modify instance type: %w", err)
+	}
+
+	logger.Printf("Successfully modified instance %s to type %s", instanceID, instanceType)
+	return nil
+}
+
 // convertToProviderInstance converts EC2 instance to provider instance
 func (s *ComputeService) convertToProviderInstance(inst *types.Instance) *provider.Instance {
 	p := &provider.Instance{

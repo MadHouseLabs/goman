@@ -82,6 +82,7 @@ const (
 	ClusterPhasePending      = "Pending"
 	ClusterPhaseProvisioning = "Provisioning"
 	ClusterPhaseRunning      = "Running"
+	ClusterPhaseUpdating     = "Updating"
 	ClusterPhaseTerminating  = "Terminating"
 	ClusterPhaseFailed       = "Failed"
 	ClusterPhaseDeleting     = "Deleting"

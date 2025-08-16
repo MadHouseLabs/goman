@@ -26,18 +26,18 @@ const (
 
 // Node represents a single node in the k3s cluster
 type Node struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Role         NodeRole  `json:"role"`
-	IP           string    `json:"ip"`
-	Status       string    `json:"status"`
-	CPU          int       `json:"cpu"`
-	MemoryGB     int       `json:"memory_gb"`
-	StorageGB    int       `json:"storage_gb"`
-	Provider     string    `json:"provider"`
-	InstanceType string    `json:"instance_type"`
-	Region       string    `json:"region"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           string    `json:"id" yaml:"id"`
+	Name         string    `json:"name" yaml:"name"`
+	Role         NodeRole  `json:"role" yaml:"role"`
+	IP           string    `json:"ip" yaml:"ip"`
+	Status       string    `json:"status" yaml:"status"`
+	CPU          int       `json:"cpu" yaml:"cpu"`
+	MemoryGB     int       `json:"memory_gb" yaml:"memoryGB"`
+	StorageGB    int       `json:"storage_gb" yaml:"storageGB"`
+	Provider     string    `json:"provider" yaml:"provider"`
+	InstanceType string    `json:"instance_type" yaml:"instanceType"`
+	Region       string    `json:"region" yaml:"region"`
+	CreatedAt    time.Time `json:"created_at" yaml:"createdAt"`
 }
 
 // ClusterMode represents the deployment mode of the cluster
@@ -52,6 +52,7 @@ const (
 type K3sCluster struct {
 	ID             string        `json:"id"`
 	Name           string        `json:"name"`
+	Description    string        `json:"description"`
 	Status         ClusterStatus `json:"status"`
 	Mode           ClusterMode   `json:"mode"`
 	Region         string        `json:"region"`
@@ -91,12 +92,12 @@ func (c *K3sCluster) GetMasterCount() int {
 
 // K3sFeatures represents optional k3s features
 type K3sFeatures struct {
-	Traefik        bool   `json:"traefik"`
-	ServiceLB      bool   `json:"servicelb"`
-	LocalStorage   bool   `json:"local_storage"`
-	MetricsServer  bool   `json:"metrics_server"`
-	CoreDNS        bool   `json:"coredns"`
-	FlannelBackend string `json:"flannel_backend"`
+	Traefik        bool   `json:"traefik" yaml:"traefik"`
+	ServiceLB      bool   `json:"servicelb" yaml:"serviceLB"`
+	LocalStorage   bool   `json:"local_storage" yaml:"localStorage"`
+	MetricsServer  bool   `json:"metrics_server" yaml:"metricsServer"`
+	CoreDNS        bool   `json:"coredns" yaml:"coreDNS"`
+	FlannelBackend string `json:"flannel_backend" yaml:"flannelBackend"`
 }
 
 // ClusterConfig represents the user's input configuration for a cluster
