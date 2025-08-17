@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Goman is a serverless K3s cluster management tool that uses AWS Lambda for reconciliation and S3 for state management. It provides both a TUI (Terminal User Interface) and CLI for managing Kubernetes clusters without requiring dedicated infrastructure.
 
+## Development Approach
+
+Work on one task at a time. Focus on completing each task fully before moving to the next.
+
 ## Build and Run Commands
 
 ### Essential Development Commands

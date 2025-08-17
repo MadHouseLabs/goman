@@ -55,6 +55,9 @@ type ClusterResourceStatus struct {
 	// K3s cluster status (will be populated after installation)
 	K3sServerURL       string `json:"k3sServerUrl,omitempty"`       // K3s API server URL
 	KubeConfig         string `json:"kubeConfig,omitempty"`         // Base64 encoded kubeconfig
+	K3sServerToken     string `json:"k3sServerToken,omitempty"`     // Token for joining additional masters
+	K3sAgentToken      string `json:"k3sAgentToken,omitempty"`      // Token for joining worker nodes
+	InternalDNS        string `json:"internalDns,omitempty"`        // Internal DNS name for API server (HA mode)
 
 	// Progress tracking
 	Message string `json:"message,omitempty"`
@@ -76,6 +79,11 @@ type InstanceStatus struct {
 	K3sVersion         string    `json:"k3sVersion,omitempty"`
 	K3sInstallTime     *time.Time `json:"k3sInstallTime,omitempty"`
 	K3sInstallError    string    `json:"k3sInstallError,omitempty"`
+	
+	// K3s configuration status
+	K3sRunning         bool      `json:"k3sRunning"`
+	K3sConfigTime      *time.Time `json:"k3sConfigTime,omitempty"`
+	K3sConfigError     string    `json:"k3sConfigError,omitempty"`
 }
 
 // Condition represents a condition of a resource
@@ -91,7 +99,8 @@ type Condition struct {
 const (
 	ClusterPhasePending      = "Pending"
 	ClusterPhaseProvisioning = "Provisioning"
-	ClusterPhaseInstalling   = "Installing"  // New phase for K3s installation
+	ClusterPhaseInstalling   = "Installing"   // K3s binary installation
+	ClusterPhaseConfiguring  = "Configuring"   // K3s server configuration and startup
 	ClusterPhaseRunning      = "Running"
 	ClusterPhaseUpdating     = "Updating"
 	ClusterPhaseTerminating  = "Terminating"

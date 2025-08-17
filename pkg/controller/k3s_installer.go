@@ -167,16 +167,19 @@ func (r *Reconciler) reconcileInstalling(ctx context.Context, resource *models.C
 	log.Printf("[INSTALLING] K3s binary installed on all instances for cluster %s", resource.Name)
 	
 	// Note: We're only installing the binary, not configuring or starting K3s services yet
-	// Cluster formation and service configuration will be handled in a separate phase
+	// Cluster formation and service configuration will be handled in the Configuring phase
 	
-	// Transition to running phase (binary installation complete)
-	resource.Status.Phase = models.ClusterPhaseRunning
-	resource.Status.Message = "K3s binary installed successfully"
+	// Transition to Configuring phase to start K3s services
+	resource.Status.Phase = models.ClusterPhaseConfiguring
+	resource.Status.Message = "K3s binary installed, starting configuration"
 	now := time.Now()
 	resource.Status.LastReconcileTime = &now
 	
-	log.Printf("[INSTALLING] Cluster %s transitioned to running phase", resource.Name)
-	return &models.ReconcileResult{}, nil
+	log.Printf("[INSTALLING] Cluster %s transitioned to configuring phase", resource.Name)
+	return &models.ReconcileResult{
+		Requeue:      true,
+		RequeueAfter: 5 * time.Second,
+	}, nil
 }
 
 // generateK3sInstallScript generates the installation script for K3s

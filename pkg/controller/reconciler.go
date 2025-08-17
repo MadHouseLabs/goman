@@ -541,16 +541,72 @@ func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.Clus
 		// Update existing entries in Status.Instances
 		for i := range resource.Status.Instances {
 			if cloudInst, ok := instanceMap[resource.Status.Instances[i].Name]; ok {
-				// Update with current state from cloud
+				// Update with current state from cloud - but preserve K3s status fields
 				resource.Status.Instances[i].State = cloudInst.State
 				resource.Status.Instances[i].PrivateIP = cloudInst.PrivateIP
 				resource.Status.Instances[i].PublicIP = cloudInst.PublicIP
-				log.Printf("Updated instance %s: PrivateIP=%s, PublicIP=%s", 
+				// NOTE: We intentionally DO NOT update K3s status fields here
+				// Those are managed by the Configuring phase and K3s health checks
+				log.Printf("Updated instance %s: PrivateIP=%s, PublicIP=%s, K3sRunning=%v", 
 					resource.Status.Instances[i].Name, 
 					cloudInst.PrivateIP, 
-					cloudInst.PublicIP)
+					cloudInst.PublicIP,
+					resource.Status.Instances[i].K3sRunning)
 			}
 		}
+	}
+	
+	// Check K3s service health on master nodes
+	// We check all master nodes regardless of K3sRunning status to detect issues
+	needsConfiguration := false
+	for i := range resource.Status.Instances {
+		inst := &resource.Status.Instances[i]
+		if inst.Role == "master" {
+			// Check if K3s was supposed to be installed and running
+			if inst.K3sInstalled {
+				// Check if K3s service is actually running
+				isRunning, err := r.checkK3sServiceStatus(ctx, inst.InstanceID)
+				if err != nil {
+					log.Printf("[RUNNING] Failed to check K3s service on %s: %v", inst.Name, err)
+				} else {
+					if isRunning && !inst.K3sRunning {
+						// Service is running but status says it's not - update status
+						log.Printf("[RUNNING] K3s service is running on %s but status was false, updating", inst.Name)
+						inst.K3sRunning = true
+					} else if !isRunning && inst.K3sRunning {
+						// Service stopped but status says it's running
+						log.Printf("[RUNNING] K3s service stopped on %s, marking as not running", inst.Name)
+						inst.K3sRunning = false
+						inst.K3sConfigError = "K3s service stopped unexpectedly"
+						needsConfiguration = true
+					} else if !isRunning && !inst.K3sRunning {
+						// Service is not running and status reflects that - needs configuration
+						log.Printf("[RUNNING] K3s service not running on %s, needs configuration", inst.Name)
+						needsConfiguration = true
+					}
+				}
+			} else if !inst.K3sInstalled {
+				// K3s not installed at all - needs installation
+				log.Printf("[RUNNING] K3s not installed on %s, needs installation", inst.Name)
+				resource.Status.Phase = models.ClusterPhaseInstalling
+				resource.Status.Message = "K3s installation required"
+				return &models.ReconcileResult{
+					Requeue:      true,
+					RequeueAfter: 10 * time.Second,
+				}, nil
+			}
+		}
+	}
+	
+	// If any master needs configuration, transition to Configuring phase
+	if needsConfiguration {
+		log.Printf("[RUNNING] Detected K3s services need configuration, transitioning to Configuring phase")
+		resource.Status.Phase = models.ClusterPhaseConfiguring
+		resource.Status.Message = "Configuring K3s services"
+		return &models.ReconcileResult{
+			Requeue:      true,
+			RequeueAfter: 10 * time.Second,
+		}, nil
 	}
 
 	// Update last reconcile time
@@ -889,16 +945,6 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 		log.Printf("[CONFIG] No instance_type found in cluster config, using default: %s", resource.Spec.InstanceType)
 	}
 
-	// Extract master nodes to get node count and possibly override instance type
-	if masterNodes, ok := cluster["master_nodes"].([]interface{}); ok && len(masterNodes) > 0 {
-		resource.Spec.MasterCount = len(masterNodes)
-		if node, ok := masterNodes[0].(map[string]interface{}); ok {
-			if instanceType := getStringFromMap(node, "instance_type"); instanceType != "" {
-				resource.Spec.InstanceType = instanceType
-			}
-		}
-	}
-
 	// Set status based on cluster status
 	if status := getStringFromMap(cluster, "status"); status != "" {
 		switch status {
@@ -957,6 +1003,19 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 						if k3sInstallError, ok := instData["k3s_install_error"].(string); ok {
 							instance.K3sInstallError = k3sInstallError
 						}
+						
+						// Load K3s configuration status fields
+						if k3sRunning, ok := instData["k3s_running"].(bool); ok {
+							instance.K3sRunning = k3sRunning
+						}
+						if k3sConfigTime, ok := instData["k3s_config_time"].(string); ok {
+							if t, err := time.Parse(time.RFC3339, k3sConfigTime); err == nil {
+								instance.K3sConfigTime = &t
+							}
+						}
+						if k3sConfigError, ok := instData["k3s_config_error"].(string); ok {
+							instance.K3sConfigError = k3sConfigError
+						}
 					}
 				}
 				
@@ -1000,6 +1059,8 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 					resource.Status.Phase = models.ClusterPhaseProvisioning
 				case models.ClusterPhaseInstalling:
 					resource.Status.Phase = models.ClusterPhaseInstalling
+				case models.ClusterPhaseConfiguring:
+					resource.Status.Phase = models.ClusterPhaseConfiguring
 				case models.ClusterPhaseRunning:
 					resource.Status.Phase = models.ClusterPhaseRunning
 				case models.ClusterPhaseFailed:
@@ -1103,6 +1164,17 @@ func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.C
 		}
 		if inst.K3sInstallError != "" {
 			instanceState["k3s_install_error"] = inst.K3sInstallError
+		}
+		
+		// Add K3s configuration status fields
+		if inst.K3sRunning {
+			instanceState["k3s_running"] = inst.K3sRunning
+			if inst.K3sConfigTime != nil {
+				instanceState["k3s_config_time"] = inst.K3sConfigTime.Format(time.RFC3339)
+			}
+		}
+		if inst.K3sConfigError != "" {
+			instanceState["k3s_config_error"] = inst.K3sConfigError
 		}
 		
 		instanceStates[inst.Name] = instanceState

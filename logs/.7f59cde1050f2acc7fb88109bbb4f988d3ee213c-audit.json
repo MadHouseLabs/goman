@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "/Users/karthik/dev/goman/logs/.7f59cde1050f2acc7fb88109bbb4f988d3ee213c-audit.json",
+    "files": [
+        {
+            "date": 1755441802305,
+            "name": "/Users/karthik/dev/goman/logs/mcp-puppeteer-2025-08-17.log",
+            "hash": "8567e622fc90ba653e0ddf81f5c4cda617fc826d0b26bf43ae1e223414ebcde7"
+        }
+    ],
+    "hashType": "sha256"
+}

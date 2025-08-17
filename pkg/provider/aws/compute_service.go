@@ -712,7 +712,7 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 			GroupId: aws.String(securityGroupID),
 			IpPermissions: []types.IpPermission{
 				// No SSH access needed - using Systems Manager Session Manager
-				// K3s API server - restricted to VPC CIDR
+				// K3s API server - allow from all nodes
 				{
 					IpProtocol: aws.String("tcp"),
 					FromPort:   aws.Int32(6443),
@@ -720,11 +720,23 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 					UserIdGroupPairs: []types.UserIdGroupPair{
 						{
 							GroupId:     aws.String(securityGroupID),
-							Description: aws.String("K3s API server - internal access only"),
+							Description: aws.String("K3s API server - all nodes"),
 						},
 					},
 				},
-				// K3s node communication
+				// etcd client/server communication - CRITICAL for HA clusters
+				{
+					IpProtocol: aws.String("tcp"),
+					FromPort:   aws.Int32(2379),
+					ToPort:     aws.Int32(2380),
+					UserIdGroupPairs: []types.UserIdGroupPair{
+						{
+							GroupId:     aws.String(securityGroupID),
+							Description: aws.String("etcd client and peer - required for HA"),
+						},
+					},
+				},
+				// Kubelet metrics
 				{
 					IpProtocol: aws.String("tcp"),
 					FromPort:   aws.Int32(10250),
@@ -732,7 +744,7 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 					UserIdGroupPairs: []types.UserIdGroupPair{
 						{
 							GroupId:     aws.String(securityGroupID),
-							Description: aws.String("Kubelet API"),
+							Description: aws.String("Kubelet metrics"),
 						},
 					},
 				},
@@ -745,6 +757,42 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 						{
 							GroupId:     aws.String(securityGroupID),
 							Description: aws.String("Flannel VXLAN"),
+						},
+					},
+				},
+				// Flannel Wireguard with IPv4 (optional)
+				{
+					IpProtocol: aws.String("udp"),
+					FromPort:   aws.Int32(51820),
+					ToPort:     aws.Int32(51820),
+					UserIdGroupPairs: []types.UserIdGroupPair{
+						{
+							GroupId:     aws.String(securityGroupID),
+							Description: aws.String("Flannel Wireguard IPv4"),
+						},
+					},
+				},
+				// Flannel Wireguard with IPv6 (optional)
+				{
+					IpProtocol: aws.String("udp"),
+					FromPort:   aws.Int32(51821),
+					ToPort:     aws.Int32(51821),
+					UserIdGroupPairs: []types.UserIdGroupPair{
+						{
+							GroupId:     aws.String(securityGroupID),
+							Description: aws.String("Flannel Wireguard IPv6"),
+						},
+					},
+				},
+				// Embedded distributed registry - Spegel (optional)
+				{
+					IpProtocol: aws.String("tcp"),
+					FromPort:   aws.Int32(5001),
+					ToPort:     aws.Int32(5001),
+					UserIdGroupPairs: []types.UserIdGroupPair{
+						{
+							GroupId:     aws.String(securityGroupID),
+							Description: aws.String("Spegel distributed registry"),
 						},
 					},
 				},

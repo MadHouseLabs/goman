@@ -145,6 +145,7 @@ func (p *AWSProvider) GetComputeService() provider.ComputeService {
 	return p.computeService
 }
 
+
 // Name returns the provider name
 func (p *AWSProvider) Name() string {
 	return "aws"

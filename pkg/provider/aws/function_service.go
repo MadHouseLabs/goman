@@ -361,8 +361,13 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 	}
 
 	// Attach basic Lambda execution policy
-	policies := []string{
-		"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+	basicPolicyArn := "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+	_, err = s.iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+		RoleName:  aws.String(roleName),
+		PolicyArn: aws.String(basicPolicyArn),
+	})
+	if err != nil && !strings.Contains(err.Error(), "AttachedPolicies") {
+		logger.Printf("Warning: Failed to attach basic Lambda execution policy: %v", err)
 	}
 
 	// Create and attach custom policy with least privilege
@@ -505,66 +510,56 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to marshal policy document: %w", err)
 	}
 
-	// Try to create the policy first
+	// Since we're pre-v1.0, always recreate the policy for simplicity
+	// This ensures we always have the latest permissions without complex version management
 	policyArn := fmt.Sprintf("arn:aws:iam::%s:policy/%s", s.accountID, policyName)
+	
+	// First, detach the policy from the role if it exists
+	_, _ = s.iamClient.DetachRolePolicy(ctx, &iam.DetachRolePolicyInput{
+		RoleName:  aws.String(roleName),
+		PolicyArn: aws.String(policyArn),
+	})
+	
+	// Delete all non-default policy versions if they exist
+	listVersionsOutput, _ := s.iamClient.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{
+		PolicyArn: aws.String(policyArn),
+	})
+	if listVersionsOutput != nil && listVersionsOutput.Versions != nil {
+		for _, version := range listVersionsOutput.Versions {
+			if !version.IsDefaultVersion {
+				s.iamClient.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{
+					PolicyArn: aws.String(policyArn),
+					VersionId: version.VersionId,
+				})
+			}
+		}
+	}
+	
+	// Delete the existing policy
+	_, _ = s.iamClient.DeletePolicy(ctx, &iam.DeletePolicyInput{
+		PolicyArn: aws.String(policyArn),
+	})
+	
+	// Create fresh policy with latest permissions
 	createPolicyOutput, err := s.iamClient.CreatePolicy(ctx, &iam.CreatePolicyInput{
 		PolicyName:     aws.String(policyName),
 		PolicyDocument: aws.String(string(policyJSON)),
 		Description:    aws.String("Least privilege policy for goman Lambda function"),
 	})
-
+	
 	if err != nil {
-		// Policy already exists, update it by creating a new version
-		if strings.Contains(err.Error(), "EntityAlreadyExists") {
-			// First, list and delete old policy versions to make room
-			listVersionsOutput, listErr := s.iamClient.ListPolicyVersions(ctx, &iam.ListPolicyVersionsInput{
-				PolicyArn: aws.String(policyArn),
-			})
-
-			if listErr == nil && listVersionsOutput.Versions != nil {
-				// AWS allows max 5 versions. Delete old non-default versions
-				for _, version := range listVersionsOutput.Versions {
-					if !version.IsDefaultVersion && len(listVersionsOutput.Versions) >= 5 {
-						_, delErr := s.iamClient.DeletePolicyVersion(ctx, &iam.DeletePolicyVersionInput{
-							PolicyArn: aws.String(policyArn),
-							VersionId: version.VersionId,
-						})
-						if delErr != nil {
-							logger.Printf("Warning: Failed to delete old policy version %s: %v", *version.VersionId, delErr)
-						}
-					}
-				}
-			}
-
-			// Create new policy version
-			_, versionErr := s.iamClient.CreatePolicyVersion(ctx, &iam.CreatePolicyVersionInput{
-				PolicyArn:      aws.String(policyArn),
-				PolicyDocument: aws.String(string(policyJSON)),
-				SetAsDefault:   true,
-			})
-
-			if versionErr != nil {
-				return "", fmt.Errorf("failed to create new policy version: %w", versionErr)
-			}
-
-			// Policy updated successfully
-			policies = append(policies, policyArn)
-		} else {
-			// Some other error occurred
-			return "", fmt.Errorf("failed to create policy: %w", err)
-		}
-	} else {
-		policies = append(policies, *createPolicyOutput.Policy.Arn)
+		return "", fmt.Errorf("failed to create policy %s: %w", policyName, err)
 	}
-
-	for _, policyArn := range policies {
-		_, err = s.iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
-			RoleName:  aws.String(roleName),
-			PolicyArn: aws.String(policyArn),
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to attach policy %s: %w", policyArn, err)
-		}
+	
+	logger.Printf("Created fresh IAM policy %s with latest permissions", policyName)
+	
+	// Attach the fresh policy
+	_, err = s.iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+		RoleName:  aws.String(roleName),
+		PolicyArn: createPolicyOutput.Policy.Arn,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to attach policy %s: %w", *createPolicyOutput.Policy.Arn, err)
 	}
 
 	// Wait a bit for the role to be available
