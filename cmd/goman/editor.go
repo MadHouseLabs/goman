@@ -25,39 +25,46 @@ func editCluster(cluster models.K3sCluster) {
 	app.Suspend(func() {
 		// Clear and reset terminal for a clean editor experience
 		fmt.Print("\033[2J\033[H\033[?47l")
-		// Convert cluster to YAML format for editing
+		// Convert cluster to YAML format for editing - only show editable fields
 		yamlContent := fmt.Sprintf(`# K3s Cluster Configuration - Edit Mode
 # =====================================
-# Modify the fields below to update your cluster configuration.
-# Note: Some fields like 'name' cannot be changed after creation.
+# 
+# CLUSTER INFORMATION (Read-Only):
+# --------------------------------
+# Name: %s
+# Mode: %s
+# Created: %s
+# Status: %s
+# K3s Version: %s
+# Network CIDR: %s
+# Service CIDR: %s
+#
+# NOTE: Name, Mode, K3s Version, and Network settings CANNOT be changed.
+# To change these, you must create a new cluster.
+#
+# =====================================
+# EDITABLE CONFIGURATION
+# =====================================
+# Only the fields below can be modified:
 
-# Basic Configuration
-# -------------------
-name: %s                       # Cannot be changed
-description: "%s"              # Cluster description
-mode: %s                       # Cannot be changed - Cluster mode is immutable after creation
-region: %s                     # AWS region
-instanceType: %s               # EC2 instance type (will resize existing instances)
+# Cluster Description
+description: "%s"
 
-# Version Configuration
-# --------------------
-k3sVersion: %s                 # K3s version
-# kubeVersion: %s              # Kubernetes version
+# AWS Region (WARNING: Changing region will provision NEW instances)
+region: %s
 
-# Network Configuration
-# --------------------
-networkCIDR: %s                # VPC CIDR block
-serviceCIDR: %s                # Service CIDR
-# clusterDNS: %s               # Cluster DNS IP
+# EC2 Instance Type (will trigger instance resize)
+instanceType: %s
 
-# Tags (Optional)
-# --------------
+# Tags (optional)
 # tags:
-#   - Environment:production
-#   - Team:platform
-`, cluster.Name, cluster.Description, cluster.Mode, cluster.Region, cluster.InstanceType,
-			cluster.K3sVersion, cluster.KubeVersion,
-			cluster.NetworkCIDR, cluster.ServiceCIDR, cluster.ClusterDNS)
+#   Environment: production
+#   Team: platform
+`, cluster.Name, cluster.Mode, cluster.CreatedAt.Format("2006-01-02 15:04:05"), cluster.Status,
+			cluster.K3sVersion, cluster.NetworkCIDR, cluster.ServiceCIDR,
+			cluster.Description, 
+			cluster.Region,
+			cluster.InstanceType)
 
 		// Create temporary file for editing
 		tmpFile, err := ioutil.TempFile("", fmt.Sprintf("goman-cluster-%s-*.yaml", cluster.Name))
@@ -393,34 +400,20 @@ func validateAndUpdateClusterFromEditor(originalCluster models.K3sCluster, yamlC
 		return fmt.Errorf("invalid YAML: %v", err)
 	}
 	
-	// Validate required fields
-	name, ok := config["name"].(string)
-	if !ok || name == "" {
-		return fmt.Errorf("cluster name is required")
-	}
+	// Immutable fields - use original values
+	name := originalCluster.Name
+	mode := string(originalCluster.Mode)
+	// K3s version and network settings are immutable after creation
 	
-	// Check immutable fields
-	if name != originalCluster.Name {
-		return fmt.Errorf("cluster name cannot be changed (immutable field)")
-	}
-	
-	mode, ok := config["mode"].(string)
-	if !ok || mode == "" {
-		mode = string(originalCluster.Mode) // Use original if not specified
-	}
-	
-	if mode != string(originalCluster.Mode) {
-		return fmt.Errorf("cluster mode cannot be changed (immutable field)")
-	}
-	
+	// Editable fields
 	region, ok := config["region"].(string)
 	if !ok || region == "" {
-		return fmt.Errorf("region is required")
+		region = originalCluster.Region
 	}
 	
 	instanceType, ok := config["instanceType"].(string)
 	if !ok || instanceType == "" {
-		instanceType = "t3.medium"
+		instanceType = originalCluster.InstanceType
 	}
 	
 	// Extract description
@@ -429,7 +422,7 @@ func validateAndUpdateClusterFromEditor(originalCluster models.K3sCluster, yamlC
 		description = originalCluster.Description
 	}
 	
-	// Update the cluster (this will preserve immutable fields)
+	// Update the cluster (description, region, and instanceType can change)
 	return updateExistingCluster(originalCluster.Name, name, description, mode, region, instanceType)
 }
 

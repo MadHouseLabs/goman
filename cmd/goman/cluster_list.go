@@ -8,9 +8,16 @@ import (
 	"github.com/rivo/tview"
 )
 
+// Global variables for the cluster list view
+var (
+	clusterListFlex *tview.Flex
+	emptyPlaceholder *tview.TextView
+)
+
 func createClusterListView() {
 	// Create a flex layout for the main view
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	clusterListFlex = flex  // Store reference for updates
 
 	// Create header with title and provider info
 	headerFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
@@ -65,10 +72,36 @@ func createClusterListView() {
 		clusterTable.SetCell(0, col, cell)
 	}
 
-	// Load clusters
-	refreshClusters()
+	// Create placeholder for empty state
+	emptyPlaceholder = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignCenter).
+		SetText(`
 
-	// Set up key handlers for the table
+[::d]No clusters found[::-]
+
+[::b]Get Started:[::-]
+
+Press [#8be9fd]c[::-] to create your first cluster
+Press [#8be9fd]i[::-] to initialize infrastructure
+
+[::d]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[::-]
+
+[::d]K3s is a lightweight Kubernetes distribution
+perfect for edge, IoT, CI, and development[::-]`)
+
+	// Load clusters and determine which view to show
+	refreshClusters()
+	
+	// Determine initial content area
+	var contentArea tview.Primitive
+	if len(clusters) == 0 {
+		contentArea = emptyPlaceholder
+	} else {
+		contentArea = clusterTable
+	}
+
+	// Set up key handlers for both table and placeholder
 	clusterTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyEnter:
@@ -90,6 +123,24 @@ func createClusterListView() {
 				if row > 0 && row <= len(clusters) {
 					deleteCluster(clusters[row-1])
 				}
+			case 'r', 'R':
+				go refreshClustersAsync()
+			case 'q', 'Q':
+				app.Stop()
+			}
+		}
+		return event
+	})
+	
+	// Set up key handlers for placeholder
+	emptyPlaceholder.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case 'c', 'C':
+				openClusterEditor()
+			case 'i', 'I':
+				initializeInfrastructure()
 			case 'r', 'R':
 				go refreshClustersAsync()
 			case 'q', 'Q':
@@ -134,7 +185,7 @@ func createClusterListView() {
 	flex.
 		AddItem(headerFlex, 1, 0, false).
 		AddItem(headerDivider, 1, 0, false).
-		AddItem(clusterTable, 0, 1, true).
+		AddItem(contentArea, 0, 1, true).
 		AddItem(footerDivider, 1, 0, false).
 		AddItem(statusBarFlex, 1, 0, false)
 
@@ -152,6 +203,28 @@ func refreshClusters() {
 	
 	// Update global clusters list
 	clusters = newClusters
+	
+	// Switch between table and placeholder based on cluster count
+	if clusterListFlex != nil && clusterListFlex.GetItemCount() >= 5 {
+		currentItem := clusterListFlex.GetItem(2)
+		
+		if newCount == 0 {
+			// No clusters, show placeholder
+			if _, isTable := currentItem.(*tview.Table); isTable {
+				// Replace table with placeholder
+				clusterListFlex.RemoveItem(currentItem)
+				clusterListFlex.AddItem(emptyPlaceholder, 0, 1, true)
+			}
+			return
+		} else {
+			// We have clusters, ensure table is shown
+			if _, isTable := currentItem.(*tview.Table); !isTable {
+				// Replace placeholder with table
+				clusterListFlex.RemoveItem(currentItem)
+				clusterListFlex.AddItem(clusterTable, 0, 1, true)
+			}
+		}
+	}
 	
 	// Handle row count changes
 	currentRows := clusterTable.GetRowCount() - 1 // Exclude header

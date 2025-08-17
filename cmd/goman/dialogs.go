@@ -19,7 +19,10 @@ func deleteCluster(cluster models.K3sCluster) {
 		SetButtonBackgroundColor(ColorBackground).
 		SetButtonTextColor(ColorForeground).
 		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			// First switch back to clusters page, then remove the modal
+			pages.SwitchToPage("clusters")
 			pages.RemovePage("confirm")
+			
 			if buttonLabel == "Delete" {
 				// Delete in background
 				go func() {
@@ -34,6 +37,7 @@ func deleteCluster(cluster models.K3sCluster) {
 								SetButtonBackgroundColor(ColorBackground).
 								SetButtonTextColor(ColorForeground).
 								SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+									pages.SwitchToPage("clusters")
 									pages.RemovePage("error")
 								})
 							errorModal.SetBorder(false)
@@ -61,6 +65,7 @@ func showError(message string) {
 		SetButtonBackgroundColor(ColorBackground).
 		SetButtonTextColor(ColorForeground).
 		SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+			pages.SwitchToPage("clusters")
 			pages.RemovePage("error")
 		})
 	modal.SetBorder(false)
