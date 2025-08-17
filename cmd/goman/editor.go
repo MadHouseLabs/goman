@@ -26,42 +26,16 @@ func editCluster(cluster models.K3sCluster) {
 		// Clear and reset terminal for a clean editor experience
 		fmt.Print("\033[2J\033[H\033[?47l")
 		// Convert cluster to YAML format for editing - only show editable fields
-		yamlContent := fmt.Sprintf(`# K3s Cluster Configuration - Edit Mode
-# =====================================
+		yamlContent := fmt.Sprintf(`# Editing: %s
+# Mode: %s | Status: %s | Created: %s
 # 
-# CLUSTER INFORMATION (Read-Only):
-# --------------------------------
-# Name: %s
-# Mode: %s
-# Created: %s
-# Status: %s
-# K3s Version: %s
-# Network CIDR: %s
-# Service CIDR: %s
-#
-# NOTE: Name, Mode, K3s Version, and Network settings CANNOT be changed.
-# To change these, you must create a new cluster.
-#
-# =====================================
-# EDITABLE CONFIGURATION
-# =====================================
-# Only the fields below can be modified:
+# Read-only: name, mode, k3s version, network settings
+# Editable: description, region, instanceType
 
-# Cluster Description
 description: "%s"
-
-# AWS Region (WARNING: Changing region will provision NEW instances)
 region: %s
-
-# EC2 Instance Type (will trigger instance resize)
 instanceType: %s
-
-# Tags (optional)
-# tags:
-#   Environment: production
-#   Team: platform
-`, cluster.Name, cluster.Mode, cluster.CreatedAt.Format("2006-01-02 15:04:05"), cluster.Status,
-			cluster.K3sVersion, cluster.NetworkCIDR, cluster.ServiceCIDR,
+`, cluster.Name, cluster.Mode, cluster.Status, cluster.CreatedAt.Format("2006-01-02"),
 			cluster.Description, 
 			cluster.Region,
 			cluster.InstanceType)
@@ -202,47 +176,14 @@ func openClusterEditor() {
 		// Clear and reset terminal for a clean editor experience
 		fmt.Print("\033[2J\033[H\033[?47l")
 		// Default YAML configuration template
-		defaultYAML := fmt.Sprintf(`# K3s Cluster Configuration
-# ===========================
-# This file defines the configuration for your K3s Kubernetes cluster.
-# Uncomment and modify the fields as needed.
+		defaultYAML := fmt.Sprintf(`# New K3s Cluster
 
-# Basic Configuration (Required)
-# ------------------------------
-name: %s               # Unique cluster identifier
-description: "Development cluster"  # Human-readable description
-
-# Cluster Mode
-# - developer: Single master node (for development/testing)
-# - ha: 3 master nodes (for production/high availability)
-mode: developer
-
-# Infrastructure Configuration
-# ----------------------------
-region: ap-south-1             # AWS region
-instanceType: t3.medium        # EC2 instance type
-
-# Version Configuration
-# --------------------
-k3sVersion: latest             # K3s version to install
-
-# Network Configuration (Optional)
-# --------------------------------
-# networkCIDR: 10.42.0.0/16    # VPC CIDR block
-# serviceCIDR: 10.43.0.0/16    # Service CIDR
-# clusterDNS: 10.43.0.10       # Cluster DNS IP
-
-# Node Configuration (Optional)
-# -----------------------------
-# minNodes: 1                  # Minimum number of nodes
-# maxNodes: 10                 # Maximum number of nodes
-
-# Tags (Optional)
-# ---------------
-# tags:
-#   - Environment:development
-#   - Team:platform
-#   - Project:demo
+name: %s
+description: "Development cluster"
+mode: developer          # developer (1 master) or ha (3 masters)
+region: ap-south-1
+instanceType: t3.medium
+k3sVersion: latest
 `, uniqueName)
 
 		// Create temporary file for editing
