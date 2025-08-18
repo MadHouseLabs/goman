@@ -180,7 +180,7 @@ func openClusterEditor() {
 
 name: %s
 description: "Development cluster"
-mode: developer          # developer (1 master) or ha (3 masters)
+mode: dev                # dev (1 master) or ha (3 masters)
 region: ap-south-1
 instanceType: t3.medium
 k3sVersion: latest
@@ -301,8 +301,8 @@ func validateAndCreateClusterFromEditor(yamlContent string) error {
 	}
 	
 	mode, ok := config["mode"].(string)
-	if !ok || (mode != "developer" && mode != "ha") {
-		return fmt.Errorf("mode must be 'developer' or 'ha'")
+	if !ok || (mode != "dev" && mode != "ha") {
+		return fmt.Errorf("mode must be 'dev' or 'ha'")
 	}
 	
 	region, ok := config["region"].(string)

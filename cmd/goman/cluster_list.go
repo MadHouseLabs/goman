@@ -12,6 +12,10 @@ import (
 var (
 	clusterListFlex *tview.Flex
 	emptyPlaceholder *tview.TextView
+	headerFlex *tview.Flex
+	headerDivider *tview.TextView
+	footerDivider *tview.TextView
+	statusBarFlex *tview.Flex
 )
 
 func createClusterListView() {
@@ -20,7 +24,7 @@ func createClusterListView() {
 	clusterListFlex = flex  // Store reference for updates
 
 	// Create header with title and provider info
-	headerFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
+	headerFlex = tview.NewFlex().SetDirection(tview.FlexColumn)
 	
 	titleText := fmt.Sprintf(" [::b]K3s Cluster Manager[::-]")
 	title := tview.NewTextView().
@@ -39,15 +43,15 @@ func createClusterListView() {
 		AddItem(providerInfo, 0, 1, false)
 
 	// Header divider
-	headerDivider := tview.NewTextView().
+	headerDivider = tview.NewTextView().
 		SetText(string(CharDivider)).
-		SetTextColor(ColorMuted).
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := x; i < x+width; i++ {
-				screen.SetContent(i, y, CharDivider, nil, StyleMuted)
-			}
-			return 0, 0, 0, 0
-		})
+		SetTextColor(ColorMuted)
+	headerDivider.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
+		for i := x; i < x+width; i++ {
+			screen.SetContent(i, y, CharDivider, nil, StyleMuted)
+		}
+		return 0, 0, 0, 0
+	})
 
 	// Create the table
 	clusterTable = tview.NewTable().
@@ -151,18 +155,18 @@ perfect for edge, IoT, CI, and development[::-]`)
 	})
 
 	// Footer divider
-	footerDivider := tview.NewTextView().
+	footerDivider = tview.NewTextView().
 		SetText(string(CharDivider)).
-		SetTextColor(ColorMuted).
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := x; i < x+width; i++ {
-				screen.SetContent(i, y, CharDivider, nil, StyleMuted)
-			}
-			return 0, 0, 0, 0
-		})
+		SetTextColor(ColorMuted)
+	footerDivider.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
+		for i := x; i < x+width; i++ {
+			screen.SetContent(i, y, CharDivider, nil, StyleMuted)
+		}
+		return 0, 0, 0, 0
+	})
 
 	// Status bar with connection status and shortcuts
-	statusBarFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
+	statusBarFlex = tview.NewFlex().SetDirection(tview.FlexColumn)
 	
 	// Connection status (left) - will be updated dynamically
 	statusText = tview.NewTextView().
@@ -211,17 +215,31 @@ func refreshClusters() {
 		if newCount == 0 {
 			// No clusters, show placeholder
 			if _, isTable := currentItem.(*tview.Table); isTable {
-				// Replace table with placeholder
-				clusterListFlex.RemoveItem(currentItem)
-				clusterListFlex.AddItem(emptyPlaceholder, 0, 1, true)
+				// We need to rebuild the flex to maintain proper order
+				clusterListFlex.Clear()
+				
+				// Re-add all components in the correct order
+				clusterListFlex.
+					AddItem(headerFlex, 1, 0, false).
+					AddItem(headerDivider, 1, 0, false).
+					AddItem(emptyPlaceholder, 0, 1, true).
+					AddItem(footerDivider, 1, 0, false).
+					AddItem(statusBarFlex, 1, 0, false)
 			}
 			return
 		} else {
 			// We have clusters, ensure table is shown
 			if _, isTable := currentItem.(*tview.Table); !isTable {
-				// Replace placeholder with table
-				clusterListFlex.RemoveItem(currentItem)
-				clusterListFlex.AddItem(clusterTable, 0, 1, true)
+				// We need to rebuild the flex to maintain proper order
+				clusterListFlex.Clear()
+				
+				// Re-add all components in the correct order
+				clusterListFlex.
+					AddItem(headerFlex, 1, 0, false).
+					AddItem(headerDivider, 1, 0, false).
+					AddItem(clusterTable, 0, 1, true).
+					AddItem(footerDivider, 1, 0, false).
+					AddItem(statusBarFlex, 1, 0, false)
 			}
 		}
 	}

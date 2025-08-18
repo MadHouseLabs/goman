@@ -31,7 +31,7 @@ type ClusterSpec struct {
 	Region       string            `json:"region"`
 	InstanceType string            `json:"instanceType"`
 	MasterCount  int               `json:"masterCount"` // Number of master nodes (1 for dev, 3 for HA)
-	Mode         string            `json:"mode"`        // "developer" or "ha"
+	Mode         string            `json:"mode"`        // "dev" or "ha"
 	K3sVersion   string            `json:"k3sVersion"`
 	Network      NetworkConfig     `json:"network"`
 	Tags         map[string]string `json:"tags,omitempty"`

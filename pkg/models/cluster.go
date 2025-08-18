@@ -44,8 +44,8 @@ type Node struct {
 type ClusterMode string
 
 const (
-	ModeDeveloper ClusterMode = "developer" // Single master node for development
-	ModeHA        ClusterMode = "ha"        // 3 master nodes for high availability
+	ModeDev ClusterMode = "dev" // Single master node for development
+	ModeHA  ClusterMode = "ha"  // 3 master nodes for high availability
 )
 
 // K3sCluster represents a k3s Kubernetes cluster
@@ -83,7 +83,7 @@ func (c *K3sCluster) GetMasterCount() int {
 	switch c.Mode {
 	case ModeHA:
 		return 3
-	case ModeDeveloper:
+	case ModeDev:
 		return 1
 	default:
 		return 1

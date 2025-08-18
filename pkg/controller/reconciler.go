@@ -910,7 +910,7 @@ func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*mode
 		ClusterID: getStringFromMap(cluster, "id"),
 		Spec: models.ClusterSpec{
 			MasterCount:  1,           // Default, will be updated from nodes or mode
-			Mode:         "developer", // Default mode
+			Mode:         "dev", // Default mode
 			InstanceType: "t3.medium",
 		},
 		Status: models.ClusterResourceStatus{

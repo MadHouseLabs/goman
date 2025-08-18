@@ -93,7 +93,7 @@ func createNewClusterWithUI(name, description, mode, region, instanceType, nodeC
 	fmt.Sscanf(nodeCountStr, "%d", &nodeCount)
 
 	// Determine cluster mode
-	clusterMode := models.ModeDeveloper
+	clusterMode := models.ModeDev
 	if mode == "ha" {
 		clusterMode = models.ModeHA
 	}
