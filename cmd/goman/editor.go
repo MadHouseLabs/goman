@@ -201,6 +201,13 @@ k3sVersion: latest
 		}
 		tmpFile.Close()
 
+		// Get file modification time before editing
+		statBefore, err := os.Stat(tmpFilePath)
+		if err != nil {
+			return
+		}
+		modTimeBefore := statBefore.ModTime()
+
 		// Determine which editor to use
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
@@ -215,6 +222,18 @@ k3sVersion: latest
 
 		if err := cmd.Run(); err != nil {
 			// User exited editor, silently return
+			return
+		}
+
+		// Check if file was modified
+		statAfter, err := os.Stat(tmpFilePath)
+		if err != nil {
+			return
+		}
+		
+		// If modification time hasn't changed, user didn't save
+		if modTimeBefore.Equal(statAfter.ModTime()) {
+			// User didn't save, don't create cluster
 			return
 		}
 

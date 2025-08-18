@@ -124,3 +124,22 @@ func (s *StorageService) ListObjects(ctx context.Context, prefix string) ([]stri
 
 	return keys, nil
 }
+
+// DeleteFolder deletes all objects with a given prefix (folder)
+func (s *StorageService) DeleteFolder(ctx context.Context, prefix string) error {
+	// List all objects with the prefix
+	objects, err := s.ListObjects(ctx, prefix)
+	if err != nil {
+		return fmt.Errorf("failed to list objects for deletion: %w", err)
+	}
+
+	// Delete each object
+	for _, key := range objects {
+		if err := s.DeleteObject(ctx, key); err != nil {
+			// Log but continue with other deletions
+			fmt.Printf("Warning: failed to delete %s: %v\n", key, err)
+		}
+	}
+
+	return nil
+}

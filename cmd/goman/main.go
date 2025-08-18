@@ -56,6 +56,10 @@ func main() {
 
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(cleanupCmd)
+	rootCmd.AddCommand(kubectlCmd)
+	rootCmd.AddCommand(clusterCmd)
+	rootCmd.AddCommand(kubeCmd)
+	rootCmd.AddCommand(tunnelCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)

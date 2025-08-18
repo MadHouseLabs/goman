@@ -316,6 +316,50 @@ func showClusterDetails(cluster models.K3sCluster) {
 			return 0, 0, 0, 0
 		})
 	
+	// Section 4: Connection Info
+	connectionTable := tview.NewTable().
+		SetBorders(false).
+		SetSelectable(false, false).
+		SetFixed(1, 2)
+	
+	// Title
+	connectionTable.SetCell(0, 0, tview.NewTableCell(" [::b]Connection").
+		SetTextColor(ColorPrimary).
+		SetAlign(tview.AlignLeft))
+	connectionTable.SetCell(0, 1, tview.NewTableCell(""))
+	
+	// Connection data
+	connRow := 1
+	
+	// Get master instance for connection
+	masterInstanceID := ""
+	if len(cluster.MasterNodes) > 0 {
+		masterInstanceID = cluster.MasterNodes[0].ID
+	}
+	
+	connectionTable.SetCell(connRow, 0, tview.NewTableCell(" Connect:").
+		SetTextColor(ColorMuted).
+		SetAlign(tview.AlignLeft))
+	connectionTable.SetCell(connRow, 1, tview.NewTableCell(fmt.Sprintf("goman kubectl connect %s", cluster.Name)).
+		SetTextColor(ColorAccent).
+		SetAlign(tview.AlignLeft))
+	connRow++
+	
+	connectionTable.SetCell(connRow, 0, tview.NewTableCell(" Master:").
+		SetTextColor(ColorMuted).
+		SetAlign(tview.AlignLeft))
+	connectionTable.SetCell(connRow, 1, tview.NewTableCell(masterInstanceID).
+		SetTextColor(ColorForeground).
+		SetAlign(tview.AlignLeft))
+	connRow++
+	
+	connectionTable.SetCell(connRow, 0, tview.NewTableCell(" Method:").
+		SetTextColor(ColorMuted).
+		SetAlign(tview.AlignLeft))
+	connectionTable.SetCell(connRow, 1, tview.NewTableCell("SSM Port Forward").
+		SetTextColor(ColorForeground).
+		SetAlign(tview.AlignLeft))
+	
 	// Create a horizontal flex to arrange the three sections with dividers
 	sectionsContainer := tview.NewFlex().SetDirection(tview.FlexColumn)
 	sectionsContainer.AddItem(clusterInfoTable, 0, 1, false)
@@ -581,7 +625,7 @@ func showClusterDetails(cluster models.K3sCluster) {
 		SetTextAlign(tview.AlignLeft)
 	
 	// Shortcuts (right)
-	shortcuts := fmt.Sprintf("%s%c%s Back  %sEnter%s Select  %sk%s Kubeconfig  %se%s Edit  %sd%s Delete  %sr%s Refresh ", 
+	shortcuts := fmt.Sprintf("%s%c%s Back  %sEnter%s Select  %sk%s Select  %se%s Edit  %sd%s Delete  %sr%s Refresh ", 
 		TagPrimary, CharArrowLeft, TagReset, 
 		TagPrimary, TagReset, 
 		TagPrimary, TagReset, 
@@ -675,7 +719,8 @@ func showClusterDetails(cluster models.K3sCluster) {
 				go refreshClustersAsync()
 				return nil
 			case 'k', 'K':
-				// TODO: Download kubeconfig
+				// Switch to this cluster (handles tunnel management)
+				switchToCluster(cluster.Name)
 				return nil
 			}
 		}

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/madhouselabs/goman/pkg/cluster"
-	"github.com/madhouselabs/goman/pkg/connectivity"
 	"github.com/madhouselabs/goman/pkg/provider/aws"
 	"github.com/spf13/cobra"
 )
@@ -64,7 +63,7 @@ var clusterDisconnectCmd = &cobra.Command{
 		}
 
 		// Use SingleTunnelManager
-		stm := connectivity.NewSingleTunnelManager()
+		stm := GetGlobalSingleTunnelManager()
 		
 		// Check if tunnel exists
 		if !stm.IsConnected(clusterName) {
@@ -96,7 +95,7 @@ var clusterStatusCmd = &cobra.Command{
 		if len(args) > 0 {
 			// Check specific cluster
 			clusterName := args[0]
-			stm := connectivity.NewSingleTunnelManager()
+			stm := GetGlobalSingleTunnelManager()
 			if stm.IsConnected(clusterName) {
 				fmt.Printf("✅ Connected to cluster %s\n", clusterName)
 				fmt.Printf("   Kubeconfig: ~/.kube/goman/%s.yaml\n", clusterName)
@@ -123,7 +122,7 @@ var clusterStatusCmd = &cobra.Command{
 			}
 
 			for _, cluster := range clusters {
-				stm := connectivity.NewSingleTunnelManager()
+				stm := GetGlobalSingleTunnelManager()
 				if stm.IsConnected(cluster.Name) {
 					fmt.Printf("✅ %s - Connected\n", cluster.Name)
 				} else {

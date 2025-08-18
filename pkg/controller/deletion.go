@@ -116,21 +116,36 @@ func (r *Reconciler) finalizeClusterDeletion(ctx context.Context, resource *mode
 		}
 	}
 
-	// Delete the resource from storage (both config and status files)
-	configKey := fmt.Sprintf("clusters/%s/config.yaml", resource.Name)
-	statusKey := fmt.Sprintf("clusters/%s/status.yaml", resource.Name)
+	// Delete all files in the cluster folder
+	clusterPrefix := fmt.Sprintf("clusters/%s/", resource.Name)
+	storageService := r.provider.GetStorageService()
 	
-	// Delete config file
-	log.Printf("[DELETE] Deleting config file: %s", configKey)
-	if err := r.provider.GetStorageService().DeleteObject(ctx, configKey); err != nil {
-		log.Printf("[DELETE] Warning: failed to delete config file: %v", err)
+	// List all objects with the cluster prefix
+	log.Printf("[DELETE] Listing all files in folder: %s", clusterPrefix)
+	objects, err := storageService.ListObjects(ctx, clusterPrefix)
+	if err != nil {
+		log.Printf("[DELETE] Warning: failed to list cluster files: %v", err)
+		// Try to delete known files anyway
+		objects = []string{
+			fmt.Sprintf("clusters/%s/config.yaml", resource.Name),
+			fmt.Sprintf("clusters/%s/status.yaml", resource.Name),
+			fmt.Sprintf("clusters/%s/kubeconfig", resource.Name),
+			fmt.Sprintf("clusters/%s/k3s-server-token", resource.Name),
+		}
 	}
 	
-	// Delete status file
-	log.Printf("[DELETE] Deleting status file: %s", statusKey)
-	if err := r.provider.GetStorageService().DeleteObject(ctx, statusKey); err != nil {
-		log.Printf("[DELETE] Warning: failed to delete status file: %v", err)
+	// Delete each file
+	deletedCount := 0
+	for _, key := range objects {
+		log.Printf("[DELETE] Deleting file: %s", key)
+		if err := storageService.DeleteObject(ctx, key); err != nil {
+			log.Printf("[DELETE] Warning: failed to delete file %s: %v", key, err)
+		} else {
+			deletedCount++
+		}
 	}
+	
+	log.Printf("[DELETE] Deleted %d files from cluster folder", deletedCount)
 	
 	log.Printf("[DELETE] Cluster %s deleted successfully", resource.Name)
 	return &models.ReconcileResult{}, nil // No requeue, deletion complete

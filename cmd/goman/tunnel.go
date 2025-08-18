@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/madhouselabs/goman/pkg/connectivity"
 	"github.com/spf13/cobra"
 )
 
@@ -24,7 +23,7 @@ var tunnelStatusCmd = &cobra.Command{
 	Short: "Show tunnel status and diagnostics",
 	Long:  `Shows detailed status of the active SSM tunnel.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		stm := connectivity.NewSingleTunnelManager()
+		stm := GetGlobalSingleTunnelManager()
 		
 		fmt.Println("🔍 SSM Tunnel Status")
 		fmt.Println("=" + strings.Repeat("=", 60))
@@ -102,7 +101,7 @@ var tunnelCleanupCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("🧹 Cleaning up SSM tunnels...")
 		
-		stm := connectivity.NewSingleTunnelManager()
+		stm := GetGlobalSingleTunnelManager()
 		
 		// Stop active tunnel
 		if err := stm.StopActiveTunnel(); err != nil {
@@ -139,7 +138,7 @@ var tunnelHealthCmd = &cobra.Command{
 			}
 		}
 		
-		stm := connectivity.NewSingleTunnelManager()
+		stm := GetGlobalSingleTunnelManager()
 		
 		fmt.Printf("🏥 Checking health of tunnel for cluster: %s\n", clusterName)
 		

@@ -1,5 +1,6 @@
 # Binaries
 /goman
+cmd/goman/goman
 build/
 *.exe
 *.dll

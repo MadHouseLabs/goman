@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/madhouselabs/goman/pkg/cluster"
-	"github.com/madhouselabs/goman/pkg/connectivity"
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/madhouselabs/goman/pkg/provider/aws"
 	"github.com/madhouselabs/goman/pkg/storage"
@@ -135,35 +134,13 @@ func findConnectedCluster() string {
 	}
 	
 	clusters := clusterManager.GetClusters()
-	stm := connectivity.NewSingleTunnelManager()
+	stm := GetGlobalSingleTunnelManager()
 	for _, cluster := range clusters {
 		if stm.IsConnected(cluster.Name) {
 			return cluster.Name
 		}
 	}
 	return ""
-}
-
-// findAllConnectedClusters returns all connected cluster names
-func findAllConnectedClusters() []string {
-	var connected []string
-	
-	// Initialize cluster manager if needed
-	if clusterManager == nil {
-		clusterManager = cluster.NewManager()
-		if clusterManager == nil {
-			return connected
-		}
-	}
-	
-	clusters := clusterManager.GetClusters()
-	stm := connectivity.NewSingleTunnelManager()
-	for _, cluster := range clusters {
-		if stm.IsConnected(cluster.Name) {
-			connected = append(connected, cluster.Name)
-		}
-	}
-	return connected
 }
 
 // downloadKubeconfig downloads the kubeconfig from S3 if it doesn't exist locally
@@ -289,7 +266,7 @@ func establishSSMTunnel(clusterName string) error {
 	}
 	
 	// Use SingleTunnelManager to ensure tunnel
-	stm := connectivity.NewSingleTunnelManager()
+	stm := GetGlobalSingleTunnelManager()
 	if err := stm.EnsureTunnel(clusterName, masterInstanceID, region); err != nil {
 		return fmt.Errorf("failed to ensure SSM tunnel: %w", err)
 	}

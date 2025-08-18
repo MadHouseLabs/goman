@@ -76,6 +76,8 @@ cat <<EOF | sudo tee /etc/rancher/k3s/config.yaml
 cluster-init: true
 tls-san:
   - %s
+  - localhost
+  - 127.0.0.1
 node-ip: %s
 disable:
   - traefik
@@ -258,6 +260,8 @@ cat <<EOF | sudo tee /etc/rancher/k3s/config.yaml
 cluster-init: true
 tls-san:
   - %s
+  - localhost
+  - 127.0.0.1
 node-ip: %s
 cluster-cidr: "10.42.0.0/16"
 service-cidr: "10.43.0.0/16"
@@ -604,6 +608,8 @@ server: https://%s:6443
 token: %s
 tls-san:
   - ${NODE_IP}
+  - localhost
+  - 127.0.0.1
 node-ip: ${NODE_IP}
 cluster-cidr: "10.42.0.0/16"
 service-cidr: "10.43.0.0/16"
@@ -887,12 +893,21 @@ func (r *Reconciler) extractAndSaveKubeconfig(ctx context.Context, resource *mod
 	}
 
 	// Update the server URL in kubeconfig
-	// Use public IP for external access (users need to connect from outside the VPC)
-	serverURL := fmt.Sprintf("https://%s:6443", masterNode.PublicIP)
+	// Use localhost for SSM port forwarding (secure access without public IPs)
+	serverURL := "https://localhost:6443"
 	
-	// Replace the default server URL with the correct one
-	kubeconfig = strings.ReplaceAll(kubeconfig, "https://127.0.0.1:6443", serverURL)
-	kubeconfig = strings.ReplaceAll(kubeconfig, "server: https://localhost:6443", fmt.Sprintf("server: %s", serverURL))
+	// Add metadata comment about the target instance for SSM connection
+	kubeconfigWithMetadata := fmt.Sprintf(`# Goman Managed Kubeconfig
+# Cluster: %s
+# Master Instance: %s
+# Private IP: %s
+# Connect via: goman kubectl connect %s
+%s`, resource.Name, masterNode.InstanceID, masterNode.PrivateIP, resource.Name, kubeconfig)
+	
+	// Replace the default server URL with localhost for port forwarding
+	kubeconfigWithMetadata = strings.ReplaceAll(kubeconfigWithMetadata, "https://127.0.0.1:6443", serverURL)
+	kubeconfigWithMetadata = strings.ReplaceAll(kubeconfigWithMetadata, "https://localhost:6443", serverURL)
+	kubeconfig = kubeconfigWithMetadata
 
 	// Save kubeconfig to S3
 	kubeconfigKey := fmt.Sprintf("clusters/%s/kubeconfig", resource.Name)
@@ -907,6 +922,18 @@ func (r *Reconciler) extractAndSaveKubeconfig(ctx context.Context, resource *mod
 	// Base64 encode and save in status
 	resource.Status.KubeConfig = base64.StdEncoding.EncodeToString([]byte(kubeconfig))
 	resource.Status.K3sServerURL = serverURL
+	
+	// Store master instance ID for SSM connection
+	resource.Status.PreferredMasterInstance = masterNode.InstanceID
+	
+	// Collect all master instance IDs (for HA mode)
+	var masterInstanceIDs []string
+	for _, inst := range resource.Status.Instances {
+		if inst.Role == "master" {
+			masterInstanceIDs = append(masterInstanceIDs, inst.InstanceID)
+		}
+	}
+	resource.Status.MasterInstanceIDs = masterInstanceIDs
 
 	// Update cluster phase to Running
 	resource.Status.Phase = models.ClusterPhaseRunning

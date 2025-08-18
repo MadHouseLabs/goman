@@ -58,6 +58,10 @@ type ClusterResourceStatus struct {
 	K3sServerToken     string `json:"k3sServerToken,omitempty"`     // Token for joining additional masters
 	K3sAgentToken      string `json:"k3sAgentToken,omitempty"`      // Token for joining worker nodes
 	InternalDNS        string `json:"internalDns,omitempty"`        // Internal DNS name for API server (HA mode)
+	
+	// Connection information for SSM access
+	MasterInstanceIDs       []string `json:"masterInstanceIds,omitempty"`       // Instance IDs of master nodes
+	PreferredMasterInstance string   `json:"preferredMasterInstance,omitempty"` // Preferred master for connections
 
 	// Progress tracking
 	Message string `json:"message,omitempty"`

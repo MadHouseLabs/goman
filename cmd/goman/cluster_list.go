@@ -32,7 +32,7 @@ func createClusterListView() {
 		SetTextAlign(tview.AlignLeft).
 		SetDynamicColors(true)
 	
-	providerText := fmt.Sprintf("[::d]Provider: AWS | Region: %s[::-] ", cfg.AWSRegion)
+	providerText := "[::d]Provider: AWS[::-] "
 	providerInfo := tview.NewTextView().
 		SetText(providerText).
 		SetTextAlign(tview.AlignRight).
@@ -61,11 +61,11 @@ func createClusterListView() {
 		SetSelectedStyle(StyleHighlight)
 
 	// Set headers with proper spacing
-	headers := []string{"  Name", "Mode", "Region", "Status", "Nodes", "Created"}
+	headers := []string{"  Name", "Mode", "Region", "Status", "Nodes", "Selected", "Created"}
 	for col, header := range headers {
 		alignment := tview.AlignLeft
-		// Center align Status and Nodes columns (columns 3, 4)
-		if col == 3 || col == 4 {
+		// Center align Status, Nodes, and Connected columns (columns 3, 4, 5)
+		if col == 3 || col == 4 || col == 5 {
 			alignment = tview.AlignCenter
 		}
 		cell := tview.NewTableCell(header).
@@ -127,6 +127,14 @@ perfect for edge, IoT, CI, and development[::-]`)
 				if row > 0 && row <= len(clusters) {
 					deleteCluster(clusters[row-1])
 				}
+			case 'k', 'K':
+				row, _ := clusterTable.GetSelection()
+				if row > 0 && row <= len(clusters) {
+					// Switch to the new cluster (handles tunnel management)
+					switchToCluster(clusters[row-1].Name)
+					// Refresh to update the Selected column
+					refreshClusters()
+				}
 			case 'r', 'R':
 				go refreshClustersAsync()
 			case 'q', 'Q':
@@ -170,12 +178,12 @@ perfect for edge, IoT, CI, and development[::-]`)
 	
 	// Connection status (left) - will be updated dynamically
 	statusText = tview.NewTextView().
-		SetText(" [green]● Connected[::-]").
+		SetText(" [green]● AWS connected[::-]").
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
 	
 	// Shortcuts (right)
-	shortcuts := fmt.Sprintf("[#8be9fd]%c%c[::-] Navigate  [#8be9fd]Enter[::-] Details  [#8be9fd]c[::-] Create  [#8be9fd]e[::-] Edit  [#8be9fd]d[::-] Delete  [#8be9fd]R[::-] Refresh  [#8be9fd]q[::-] Quit ", CharArrowUp, CharArrowDown)
+	shortcuts := fmt.Sprintf("[#8be9fd]%c%c[::-] Navigate  [#8be9fd]Enter[::-] Details  [#8be9fd]k[::-] Select  [#8be9fd]c[::-] Create  [#8be9fd]e[::-] Edit  [#8be9fd]d[::-] Delete  [#8be9fd]r[::-] Refresh  [#8be9fd]q[::-] Quit ", CharArrowUp, CharArrowDown)
 	statusRight := tview.NewTextView().
 		SetText(shortcuts).
 		SetDynamicColors(true).
@@ -277,13 +285,23 @@ func refreshClusters() {
 			statusColor = ColorDanger
 		}
 
+		// Check if this is the selected cluster
+		connectedText := "○"
+		connectedColor := ColorMuted
+		currentCluster := getCurrentCluster()
+		if currentCluster == cluster.Name {
+			connectedText = "●"
+			connectedColor = ColorSuccess
+		}
+
 		// Update cells (this will either update existing or create new)
 		clusterTable.SetCell(row, 0, tview.NewTableCell("  "+cluster.Name).SetExpansion(2))
 		clusterTable.SetCell(row, 1, tview.NewTableCell(string(cluster.Mode)).SetAlign(tview.AlignLeft).SetExpansion(1))
 		clusterTable.SetCell(row, 2, tview.NewTableCell(cluster.Region).SetAlign(tview.AlignLeft).SetExpansion(1))
 		clusterTable.SetCell(row, 3, tview.NewTableCell(string(cluster.Status)).SetTextColor(statusColor).SetAlign(tview.AlignCenter).SetExpansion(1))
 		clusterTable.SetCell(row, 4, tview.NewTableCell(fmt.Sprintf("%d", nodeCount)).SetAlign(tview.AlignCenter).SetExpansion(1))
-		clusterTable.SetCell(row, 5, tview.NewTableCell(created).SetAlign(tview.AlignLeft).SetExpansion(2))
+		clusterTable.SetCell(row, 5, tview.NewTableCell(connectedText).SetTextColor(connectedColor).SetAlign(tview.AlignCenter).SetExpansion(1))
+		clusterTable.SetCell(row, 6, tview.NewTableCell(created).SetAlign(tview.AlignLeft).SetExpansion(2))
 	}
 	
 	// Restore selection if valid
@@ -347,18 +365,18 @@ func refreshClustersAsync() {
 		
 		duration := time.Since(startTime)
 
-		// Determine connection status
+		// Determine connection status to AWS
 		var statusMsg string
 		if refreshErr != nil {
 			// Connection error
-			statusMsg = " [red]● Connection error[::-]"
+			statusMsg = " [red]● AWS connection error[::-]"
 			lastError = refreshErr
 		} else if duration > 3*time.Second {
 			// Slow connection
-			statusMsg = fmt.Sprintf(" [yellow]● Slow connection[::-] (%.1fs)", duration.Seconds())
+			statusMsg = fmt.Sprintf(" [yellow]● Slow AWS connection[::-] (%.1fs)", duration.Seconds())
 		} else {
 			// Success
-			statusMsg = " [green]● Connected[::-]"
+			statusMsg = " [green]● AWS connected[::-]"
 			lastError = nil
 		}
 
