@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/madhouselabs/goman/pkg/cluster"
-	"github.com/madhouselabs/goman/pkg/provider/aws"
 	"github.com/spf13/cobra"
 )
 
@@ -137,48 +135,19 @@ var clusterStatusCmd = &cobra.Command{
 func connectToClusterCLI(clusterName string) error {
 	fmt.Printf("🔄 Setting current cluster to %s...\n", clusterName)
 
-	// Initialize AWS provider
-	profile := os.Getenv("AWS_PROFILE")
-	if profile == "" {
-		profile = "default"
-	}
-	region := os.Getenv("AWS_REGION")
-	if region == "" {
-		region = "ap-south-1"
-	}
-
-	provider, err := aws.GetCachedProvider(profile, region)
-	if err != nil {
-		return fmt.Errorf("failed to initialize AWS provider: %w", err)
+	// Download kubeconfig if needed (reuse existing function)
+	homeDir, _ := os.UserHomeDir()
+	kubeconfigPath := filepath.Join(homeDir, ".kube", "goman", fmt.Sprintf("%s.yaml", clusterName))
+	
+	// Check if kubeconfig already exists locally
+	if _, err := os.Stat(kubeconfigPath); os.IsNotExist(err) {
+		// Download from S3 if missing
+		if err := downloadKubeconfig(clusterName); err != nil {
+			return err
+		}
 	}
 
-	storageService := provider.GetStorageService()
-	ctx := context.Background()
-
-	// Download kubeconfig from S3
-	kubeconfigKey := fmt.Sprintf("clusters/%s/kubeconfig", clusterName)
-	kubeconfigData, err := storageService.GetObject(ctx, kubeconfigKey)
-	if err != nil {
-		return fmt.Errorf("failed to download kubeconfig: %w", err)
-	}
-
-	// Save kubeconfig to local filesystem
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	kubeconfigDir := filepath.Join(homeDir, ".kube", "goman")
-	if err := os.MkdirAll(kubeconfigDir, 0755); err != nil {
-		return fmt.Errorf("failed to create kubeconfig directory: %w", err)
-	}
-
-	kubeconfigPath := filepath.Join(kubeconfigDir, fmt.Sprintf("%s.yaml", clusterName))
-	if err := os.WriteFile(kubeconfigPath, kubeconfigData, 0600); err != nil {
-		return fmt.Errorf("failed to save kubeconfig: %w", err)
-	}
-
-	// Save as current cluster (simplified - no tunnel management)
+	// Save as current cluster
 	saveCurrentCluster(clusterName)
 
 	fmt.Printf("✅ Selected cluster: %s\n", clusterName)
