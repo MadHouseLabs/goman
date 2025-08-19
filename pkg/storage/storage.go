@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/madhouselabs/goman/pkg/models"
+	"github.com/madhouselabs/goman/pkg/provider"
 )
 
 // Storage wraps a StorageBackend
@@ -29,9 +30,12 @@ type K3sClusterState struct {
 }
 
 // NewStorage creates a new storage instance with S3 backend
+// TODO: Refactor to use provider's storage service for multi-cloud support
 func NewStorage() (*Storage, error) {
 	profile := os.Getenv("AWS_PROFILE")
 
+	// For now, continue using S3Backend directly for backward compatibility
+	// In future, this should use: provider.GetStorageService() -> NewProviderBackend()
 	backend, err := NewS3Backend(profile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 storage backend: %w", err)
@@ -52,6 +56,18 @@ func NewStorageWithBackend(backend StorageBackend) (*Storage, error) {
 		return nil, err
 	}
 
+	return &Storage{
+		backend: backend,
+	}, nil
+}
+
+// NewStorageFromProvider creates a new storage instance using a provider's storage service
+// This enables multi-cloud support by using any S3-compatible storage
+func NewStorageFromProvider(storageService provider.StorageService, prefix string) (*Storage, error) {
+	backend := NewProviderBackend(storageService, prefix)
+	if err := backend.Initialize(); err != nil {
+		return nil, fmt.Errorf("failed to initialize provider storage: %w", err)
+	}
 	return &Storage{
 		backend: backend,
 	}, nil
