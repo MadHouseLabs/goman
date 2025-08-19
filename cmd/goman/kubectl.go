@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/madhouselabs/goman/pkg/provider/aws"
+	"github.com/madhouselabs/goman/pkg/provider/registry"
 	"github.com/madhouselabs/goman/pkg/storage"
 	"github.com/spf13/cobra"
 )
@@ -245,7 +245,7 @@ func showAllConnectionStatus() error {
 		region = "ap-south-1"  // Default region for goman
 	}
 	
-	_, err := aws.GetCachedProvider(profile, region)
+	_, err := registry.GetProvider("aws", profile, region)
 	if err != nil {
 		return fmt.Errorf("failed to initialize AWS provider: %w", err)
 	}

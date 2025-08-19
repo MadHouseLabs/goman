@@ -22,6 +22,8 @@ import (
 )
 
 // S3Backend implements StorageBackend using AWS S3
+// TODO: Refactor to use provider's StorageService interface for multi-cloud support
+// Currently AWS S3 specific
 type S3Backend struct {
 	client     *s3.Client
 	bucketName string

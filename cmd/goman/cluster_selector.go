@@ -7,7 +7,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/madhouselabs/goman/pkg/models"
-	"github.com/madhouselabs/goman/pkg/provider/aws"
+	"github.com/madhouselabs/goman/pkg/provider/registry"
 	"github.com/madhouselabs/goman/pkg/storage"
 	"github.com/rivo/tview"
 )
@@ -24,7 +24,7 @@ func selectCluster(prompt string) (string, error) {
 		region = "ap-south-1"
 	}
 
-	_, err := aws.GetCachedProvider(profile, region)
+	_, err := registry.GetProvider("aws", profile, region)
 	if err != nil {
 		return "", fmt.Errorf("failed to initialize AWS provider: %w", err)
 	}
@@ -138,7 +138,7 @@ func selectClusterSimple() (string, error) {
 		region = "ap-south-1"
 	}
 
-	_, err := aws.GetCachedProvider(profile, region)
+	_, err := registry.GetProvider("aws", profile, region)
 	if err != nil {
 		return "", fmt.Errorf("failed to initialize AWS provider: %w", err)
 	}

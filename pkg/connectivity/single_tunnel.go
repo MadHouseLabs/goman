@@ -226,6 +226,8 @@ func (stm *SingleTunnelManager) EnsureTunnel(clusterName, instanceID, region str
 }
 
 // StartBackgroundTunnel starts an SSM tunnel as a background process
+// TODO: Abstract this to use provider's tunnel service interface for multi-cloud support
+// Currently AWS SSM specific
 func (stm *SingleTunnelManager) StartBackgroundTunnel(instanceID, region string) (int, error) {
 	// Build SSM command
 	args := []string{

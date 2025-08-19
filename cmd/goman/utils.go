@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/madhouselabs/goman/pkg/config"
-	"github.com/madhouselabs/goman/pkg/provider/aws"
+	"github.com/madhouselabs/goman/pkg/provider/registry"
 )
 
 // initializeInfrastructure initializes AWS infrastructure
@@ -21,7 +21,7 @@ func initializeInfrastructure() {
 	}
 
 	// Get AWS provider
-	provider, err := aws.GetCachedProvider(cfg.AWSProfile, cfg.AWSRegion)
+	provider, err := registry.GetProvider("aws", cfg.AWSProfile, cfg.AWSRegion)
 	if err != nil {
 		fmt.Printf("Error getting AWS provider: %v\n", err)
 		os.Exit(1)
@@ -49,7 +49,7 @@ func forceCleanupCluster(clusterName string) {
 	}
 
 	// Get AWS provider
-	provider, err := aws.GetCachedProvider(cfg.AWSProfile, cfg.AWSRegion)
+	provider, err := registry.GetProvider("aws", cfg.AWSProfile, cfg.AWSRegion)
 	if err != nil {
 		fmt.Printf("Error getting AWS provider: %v\n", err)
 		os.Exit(1)
