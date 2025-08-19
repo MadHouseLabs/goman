@@ -24,15 +24,16 @@ func selectCluster(prompt string) (string, error) {
 		region = "ap-south-1"
 	}
 
-	_, err := registry.GetProvider("aws", profile, region)
+	provider, err := registry.GetProvider("aws", profile, region)
 	if err != nil {
 		return "", fmt.Errorf("failed to initialize AWS provider: %w", err)
 	}
 	
-	backend, err := storage.NewS3Backend(profile)
+	storageInstance, err := storage.NewStorageWithProvider(provider)
 	if err != nil {
-		return "", fmt.Errorf("failed to initialize storage backend: %w", err)
+		return "", fmt.Errorf("failed to initialize storage: %w", err)
 	}
+	backend := storageInstance.GetBackend()
 
 	// Load clusters using the same method as the TUI
 	clusterStates, err := backend.LoadAllClusterStates()
@@ -138,15 +139,16 @@ func selectClusterSimple() (string, error) {
 		region = "ap-south-1"
 	}
 
-	_, err := registry.GetProvider("aws", profile, region)
+	provider, err := registry.GetProvider("aws", profile, region)
 	if err != nil {
 		return "", fmt.Errorf("failed to initialize AWS provider: %w", err)
 	}
 	
-	backend, err := storage.NewS3Backend(profile)
+	storageInstance, err := storage.NewStorageWithProvider(provider)
 	if err != nil {
-		return "", fmt.Errorf("failed to initialize storage backend: %w", err)
+		return "", fmt.Errorf("failed to initialize storage: %w", err)
 	}
+	backend := storageInstance.GetBackend()
 
 	// Load clusters using the same method as the TUI
 	clusterStates, err := backend.LoadAllClusterStates()

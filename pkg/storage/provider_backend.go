@@ -300,3 +300,41 @@ func (pb *ProviderBackend) LoadConfig() (map[string]interface{}, error) {
 
 	return config, nil
 }
+
+// PutObject saves raw data to storage
+func (pb *ProviderBackend) PutObject(key string, data []byte) error {
+	fullKey := pb.getKey(key)
+	return pb.storageService.PutObject(context.Background(), fullKey, data)
+}
+
+// GetObject retrieves raw data from storage
+func (pb *ProviderBackend) GetObject(key string) ([]byte, error) {
+	fullKey := pb.getKey(key)
+	return pb.storageService.GetObject(context.Background(), fullKey)
+}
+
+// DeleteObject deletes an object from storage
+func (pb *ProviderBackend) DeleteObject(key string) error {
+	fullKey := pb.getKey(key)
+	return pb.storageService.DeleteObject(context.Background(), fullKey)
+}
+
+// ListObjects lists objects with a given prefix
+func (pb *ProviderBackend) ListObjects(prefix string) ([]string, error) {
+	fullPrefix := pb.getKey(prefix)
+	keys, err := pb.storageService.ListObjects(context.Background(), fullPrefix)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Remove the backend prefix from returned keys
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if pb.prefix != "" {
+			key = strings.TrimPrefix(key, pb.prefix+"/")
+		}
+		result = append(result, key)
+	}
+	
+	return result, nil
+}

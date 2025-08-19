@@ -26,6 +26,12 @@ type StorageBackend interface {
 	SaveConfig(config map[string]interface{}) error
 	LoadConfig() (map[string]interface{}, error)
 
+	// Raw object operations (for direct access)
+	PutObject(key string, data []byte) error
+	GetObject(key string) ([]byte, error)
+	DeleteObject(key string) error
+	ListObjects(prefix string) ([]string, error)
+
 	// Initialize storage backend
 	Initialize() error
 }

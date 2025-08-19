@@ -224,10 +224,17 @@ func establishSSMTunnel(clusterName string) error {
 			profile = "default"
 		}
 		
-		backend, err := storage.NewS3Backend(profile)
+		// Get provider first
+		provider, err := registry.GetProvider("aws", profile, targetCluster.Region)
+		if err != nil {
+			return fmt.Errorf("failed to initialize provider: %w", err)
+		}
+		
+		storageInstance, err := storage.NewStorageWithProvider(provider)
 		if err != nil {
 			return fmt.Errorf("failed to initialize storage: %w", err)
 		}
+		backend := storageInstance.GetBackend()
 
 		clusterState, err := backend.LoadClusterState(clusterName)
 		if err != nil {

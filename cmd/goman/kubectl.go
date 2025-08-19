@@ -245,14 +245,15 @@ func showAllConnectionStatus() error {
 		region = "ap-south-1"  // Default region for goman
 	}
 	
-	_, err := registry.GetProvider("aws", profile, region)
+	provider, err := registry.GetProvider("aws", profile, region)
 	if err != nil {
 		return fmt.Errorf("failed to initialize AWS provider: %w", err)
 	}
-	backend, err := storage.NewS3Backend(profile)
+	storageInstance, err := storage.NewStorageWithProvider(provider)
 	if err != nil {
-		return fmt.Errorf("failed to initialize storage backend: %w", err)
+		return fmt.Errorf("failed to initialize storage: %w", err)
 	}
+	backend := storageInstance.GetBackend()
 	
 	clusters, err := backend.LoadClusters()
 	if err != nil {

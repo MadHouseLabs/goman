@@ -197,23 +197,21 @@ func (m *Manager) CreateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 	if m.storage != nil {
 		// Clean up any leftover files from previous cluster with same name
 		// This prevents new clusters from picking up old "deleting" status
-		if s3Backend, ok := m.storage.GetBackend().(*storage.S3Backend); ok {
-			ctx := context.Background()
-			
-			// Delete any existing config and status files
-			configKey := fmt.Sprintf("clusters/%s/config.yaml", cluster.Name)
-			statusKey := fmt.Sprintf("clusters/%s/status.yaml", cluster.Name)
-			
-			// Delete both files
-			s3Backend.DeleteObject(ctx, configKey)
-			s3Backend.DeleteObject(ctx, statusKey)
-			
-			// Wait a bit longer to ensure:
-			// 1. S3 eventual consistency catches up
-			// 2. Any in-flight Lambda processing of the old cluster completes
-			// This prevents the new cluster from picking up stale status
-			time.Sleep(500 * time.Millisecond)
-		}
+		backend := m.storage.GetBackend()
+		
+		// Delete any existing config and status files
+		configKey := fmt.Sprintf("clusters/%s/config.yaml", cluster.Name)
+		statusKey := fmt.Sprintf("clusters/%s/status.yaml", cluster.Name)
+		
+		// Delete both files
+		backend.DeleteObject(configKey)
+		backend.DeleteObject(statusKey)
+		
+		// Wait a bit longer to ensure:
+		// 1. S3 eventual consistency catches up
+		// 2. Any in-flight Lambda processing of the old cluster completes
+		// This prevents the new cluster from picking up stale status
+		time.Sleep(500 * time.Millisecond)
 		
 		// Save config file (user-controlled data)
 		if err := m.saveClusterConfig(cluster); err != nil {
@@ -300,10 +298,10 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 			// Try to update config with deletion timestamp if it exists
 			if m.storage != nil {
 				configKey := fmt.Sprintf("clusters/%s/config.yaml", clusterName)
-				if s3Backend, ok := m.storage.GetBackend().(*storage.S3Backend); ok {
-					// Try to load existing config
-					configData, err := s3Backend.GetObject(context.Background(), configKey)
-					if err != nil {
+				backend := m.storage.GetBackend()
+				// Try to load existing config
+				configData, err := backend.GetObject(configKey)
+				if err != nil {
 						// If config doesn't exist, it's already deleted
 						if strings.Contains(err.Error(), "not found") {
 							// Clean up any remaining state files
@@ -341,14 +339,13 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 					
 					// Save the updated config with deletion timestamp
 					// This will trigger Lambda to process the deletion
-					if err := s3Backend.PutObject(context.Background(), configKey, updatedData); err != nil {
+					if err := backend.PutObject(configKey, updatedData); err != nil {
 						fmt.Printf("Warning: Could not save deletion config: %v\n", err)
 						// Still keep in list with deleting status
 					}
 					
 					// DON'T remove from list - let it show as "deleting" until Lambda removes files
 					// The loadClustersFromStorage() will remove it when files are gone
-				}
 			}
 			
 			// Keep cluster in list with "deleting" status
@@ -628,12 +625,9 @@ func (m *Manager) saveClusterConfig(cluster models.K3sCluster) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 	
-	// Use the S3 backend directly to save the raw data
-	if s3Backend, ok := m.storage.GetBackend().(*storage.S3Backend); ok {
-		return s3Backend.PutObject(context.Background(), configKey, data)
-	}
-	
-	return fmt.Errorf("storage backend does not support direct object put")
+	// Use the backend directly to save the raw data
+	backend := m.storage.GetBackend()
+	return backend.PutObject(configKey, data)
 }
 
 
