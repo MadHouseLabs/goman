@@ -23,18 +23,19 @@ type InitializeResult struct {
 
 // EnsureFullSetup ensures all required resources are properly configured for the provider
 func EnsureFullSetup(ctx context.Context) (*InitializeResult, error) {
-	_, err := storage.NewStorage()
-	if err != nil {
-		return &InitializeResult{
-			Errors: []string{fmt.Sprintf("Storage setup failed: %v", err)},
-		}, fmt.Errorf("failed to initialize storage: %w", err)
-	}
-
 	provider, err := registry.GetDefaultProvider()
 	if err != nil {
 		return &InitializeResult{
 			Errors: []string{fmt.Sprintf("Provider setup failed: %v", err)},
 		}, fmt.Errorf("failed to get provider: %w", err)
+	}
+	
+	// Initialize storage with the provider
+	_, err = storage.NewStorageWithProvider(provider)
+	if err != nil {
+		return &InitializeResult{
+			Errors: []string{fmt.Sprintf("Storage setup failed: %v", err)},
+		}, fmt.Errorf("failed to initialize storage: %w", err)
 	}
 
 	providerResult, err := provider.Initialize(ctx)

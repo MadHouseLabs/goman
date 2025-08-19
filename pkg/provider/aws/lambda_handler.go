@@ -72,7 +72,7 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 		return nil, fmt.Errorf("failed to create reconciler: %w", err)
 	}
 
-	stor, err := storage.NewStorage()
+	stor, err := storage.NewStorageWithProvider(prov)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}

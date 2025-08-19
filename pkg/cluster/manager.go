@@ -31,7 +31,19 @@ type Manager struct {
 
 // NewManager creates a new cluster manager
 func NewManager() *Manager {
-	storage, err := storage.NewStorage()
+	// Get the AWS provider for storage
+	profile := config.GetAWSProfile()
+	region := config.GetAWSRegion()
+	
+	provider, err := aws.GetCachedProvider(profile, region)
+	if err != nil {
+		// Fallback to in-memory only if provider fails
+		return &Manager{
+			clusters: []models.K3sCluster{},
+		}
+	}
+	
+	storage, err := storage.NewStorageWithProvider(provider)
 	if err != nil {
 		// Fallback to in-memory only if storage fails
 		return &Manager{

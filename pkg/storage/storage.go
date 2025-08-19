@@ -28,10 +28,11 @@ type K3sClusterState struct {
 	Metadata       map[string]interface{} `json:"metadata"`
 }
 
-// NewStorage creates a new storage instance
-// The provider should be passed from the caller to avoid circular imports
+// NewStorage is deprecated - use NewStorageWithProvider instead
+// This function is kept for backward compatibility but requires the caller
+// to have already initialized a provider
 func NewStorage() (*Storage, error) {
-	return nil, fmt.Errorf("NewStorage() is deprecated. Use NewStorageWithProvider() instead")
+	return nil, fmt.Errorf("NewStorage() requires a provider. Use NewStorageWithProvider() instead")
 }
 
 // NewStorageWithProvider creates a new storage instance with a specific provider
