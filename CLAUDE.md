@@ -55,6 +55,8 @@ The following cluster fields **cannot be changed** after creation:
 - **name**: Cluster name is immutable as it's used as the unique identifier
 - **mode**: Cluster mode (dev/ha) cannot be changed as it determines the number of master nodes (1 for dev, 3 for HA)
 
+Note: "dev" mode (not "developer") creates a single master node cluster
+
 When attempting to change these fields:
 - The UI will show a validation error as a comment at the top of the vim editor
 - The changes will not be saved to storage
@@ -66,6 +68,25 @@ The following fields **can be changed** after creation:
 - **region**: AWS region (Note: changing region will provision new instances in the new region)
 - **instanceType**: EC2 instance type (will trigger automatic resize of existing instances)
 - **k3sVersion**: K3s version (for upgrades)
+
+## Known Issues
+
+Currently, there are no known unfixed issues. 
+
+For historical issues and their resolutions, see [LEARNINGS.md](./LEARNINGS.md).
+
+## Important Implementation Notes
+
+### Metrics System
+- Requires SSM connectivity to instances
+- Uses kubectl commands via SSM to fetch metrics
+- Metrics refresh every 5 seconds in the UI
+- Provider abstraction allows future multi-cloud support
+
+### State Management
+- Split storage: `config.yaml` (desired) and `status.yaml` (actual)
+- Node naming may differ between config and status (e.g., "master" vs "master-0")
+- Status files may persist after cluster deletion (handled by stale detection logic)
 
 ## Architecture and Code Organization
 
@@ -113,10 +134,11 @@ All components implement the `Component` interface with `Init()`, `Update()`, an
 ### Lambda Controller Pattern
 The Lambda controller (`lambda/controller/`) implements Kubernetes-style reconciliation:
 
-1. **Phase-based processing**: Each cluster operation goes through phases
+1. **Phase-based processing**: Each cluster operation goes through phases (Creating → Provisioning → Installing → Configuring → Running)
 2. **Idempotent operations**: Can safely retry at any phase
-3. **Distributed locking**: Prevents concurrent modifications
-4. **Automatic requeueing**: Long operations reschedule themselves
+3. **Distributed locking**: Prevents concurrent modifications via DynamoDB
+4. **Automatic requeueing**: Long operations reschedule themselves via SQS
+5. **Environment preservation**: When updating Lambda config, existing env vars must be preserved
 
 ### Critical Files and Their Purpose
 
@@ -144,10 +166,12 @@ GOMAN_K3S_VERSION           # K3s version to install
 
 ## AWS Resources Created
 
-The system creates these resources automatically:
-- **S3 Bucket**: `goman-{accountID}` - State storage
+The system creates these resources automatically (all in ap-south-1 region):
+- **S3 Bucket**: `goman-{accountID}` - State storage with event notifications
 - **DynamoDB Table**: `goman-resource-locks` - Distributed locking
+- **SQS Queue**: `goman-reconcile-queue-{accountID}` - Lambda requeue mechanism
 - **Lambda Function**: `goman-controller-{accountID}` - Reconciliation controller
+- **EventBridge Rule**: `goman-ec2-state-change-rule` - EC2 state change notifications
 - **IAM Roles**: Lambda execution and SSM instance profiles
 - **Security Groups**: Per-cluster network isolation
 - **EC2 Instances**: Cluster nodes with SSM agent
