@@ -337,6 +337,11 @@ func (p *AWSProvider) Initialize(ctx context.Context) (*provider.InitializeResul
 	result.AuthReady = true
 	result.Resources["iam_role_lambda"] = fmt.Sprintf("goman-lambda-role-%s", p.accountID)
 
+	// Check if there were any errors and return them
+	if len(result.Errors) > 0 {
+		return result, fmt.Errorf("initialization completed with errors: %s", strings.Join(result.Errors, "; "))
+	}
+
 	return result, nil
 }
 
@@ -658,27 +663,66 @@ func (p *AWSProvider) setupSQSQueue(ctx context.Context, functionName string) (s
 		EventSourceArn: aws.String(queueArn),
 	})
 	
-	if err == nil && len(listResult.EventSourceMappings) == 0 {
-		// Create new event source mapping
-		_, err = p.lambdaClient.CreateEventSourceMapping(ctx, &lambda.CreateEventSourceMappingInput{
-			EventSourceArn: aws.String(queueArn),
-			FunctionName:   aws.String(functionName),
-			BatchSize:      aws.Int32(1), // Process one message at a time
-			Enabled:        aws.Bool(true),
-		})
-		if err != nil {
-			return queueURL, fmt.Errorf("failed to create event source mapping: %w", err)
+	if err == nil {
+		if len(listResult.EventSourceMappings) == 0 {
+			// Create new event source mapping
+			_, err = p.lambdaClient.CreateEventSourceMapping(ctx, &lambda.CreateEventSourceMappingInput{
+				EventSourceArn: aws.String(queueArn),
+				FunctionName:   aws.String(functionName),
+				BatchSize:      aws.Int32(1), // Process one message at a time
+				Enabled:        aws.Bool(true),
+			})
+			if err != nil {
+				return queueURL, fmt.Errorf("failed to create event source mapping: %w", err)
+			}
+			logger.Printf("Created SQS event source mapping for Lambda function %s", functionName)
+		} else {
+			// Check if existing mapping is enabled
+			for _, mapping := range listResult.EventSourceMappings {
+				if mapping.State != nil && *mapping.State != "Enabled" {
+					// Enable the existing mapping
+					_, err = p.lambdaClient.UpdateEventSourceMapping(ctx, &lambda.UpdateEventSourceMappingInput{
+						UUID:    mapping.UUID,
+						Enabled: aws.Bool(true),
+					})
+					if err != nil {
+						logger.Printf("Warning: Failed to enable existing event source mapping: %v", err)
+					} else {
+						logger.Printf("Enabled existing SQS event source mapping for Lambda function %s", functionName)
+					}
+				}
+			}
 		}
-		logger.Printf("Created SQS event source mapping for Lambda function %s", functionName)
 	}
+	
+	// Get existing Lambda configuration to preserve environment variables
+	existingConfig, err := p.lambdaClient.GetFunctionConfiguration(ctx, &lambda.GetFunctionConfigurationInput{
+		FunctionName: aws.String(functionName),
+	})
+	if err != nil {
+		logger.Printf("Warning: Failed to get existing Lambda configuration: %v", err)
+		// Try to update anyway with just the new variable
+		existingConfig = &lambda.GetFunctionConfigurationOutput{
+			Environment: &lambdatypes.EnvironmentResponse{
+				Variables: map[string]string{},
+			},
+		}
+	}
+	
+	// Merge existing environment variables with new one
+	envVars := make(map[string]string)
+	if existingConfig.Environment != nil && existingConfig.Environment.Variables != nil {
+		for k, v := range existingConfig.Environment.Variables {
+			envVars[k] = v
+		}
+	}
+	envVars["RECONCILE_QUEUE_URL"] = queueURL
 	
 	// Update Lambda environment variables to include queue URL
 	_, err = p.lambdaClient.UpdateFunctionConfiguration(ctx, &lambda.UpdateFunctionConfigurationInput{
 		FunctionName: aws.String(functionName),
 		Environment: &lambdatypes.Environment{
-			Variables: map[string]string{
-				"RECONCILE_QUEUE_URL": queueURL,
-			},
+			Variables: envVars,
 		},
 	})
 	if err != nil {

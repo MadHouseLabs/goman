@@ -29,12 +29,36 @@ func initializeInfrastructure() {
 
 	// Initialize infrastructure
 	ctx := context.Background()
-	if _, err := provider.Initialize(ctx); err != nil {
-		fmt.Printf("Error initializing infrastructure: %v\n", err)
+	result, err := provider.Initialize(ctx)
+	if err != nil {
+		fmt.Printf("❌ Error initializing infrastructure: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("✅ Infrastructure initialized successfully!")
+	// Show initialization result details
+	if result != nil {
+		fmt.Println("\n📋 Initialization Status:")
+		fmt.Printf("  Storage: %v\n", result.StorageReady)
+		fmt.Printf("  Lock Service: %v\n", result.LockServiceReady)
+		fmt.Printf("  Lambda Function: %v\n", result.FunctionReady)
+		fmt.Printf("  Notifications: %v\n", result.NotificationsReady)
+		
+		if len(result.Resources) > 0 {
+			fmt.Println("\n📦 Resources Created:")
+			for key, value := range result.Resources {
+				fmt.Printf("  %s: %s\n", key, value)
+			}
+		}
+		
+		if len(result.Errors) > 0 {
+			fmt.Println("\n⚠️  Warnings:")
+			for _, err := range result.Errors {
+				fmt.Printf("  - %s\n", err)
+			}
+		}
+	}
+
+	fmt.Println("\n✅ Infrastructure initialized successfully!")
 }
 
 // forceCleanupCluster removes all AWS resources for a cluster

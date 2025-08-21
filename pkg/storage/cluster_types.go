@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"fmt"
 	"time"
+	
 	"github.com/madhouselabs/goman/pkg/models"
 )
 
@@ -147,9 +149,20 @@ func ConvertFromClusterConfig(config *ClusterConfig, status *ClusterStatus) mode
 		// If the status has deletion_requested in metadata but config doesn't have DeletionTimestamp,
 		// this is a stale status from a previous cluster with the same name
 		if status.Metadata != nil {
-			if _, hasDeletionRequested := status.Metadata["deletion_requested"]; hasDeletionRequested {
-				// This is a stale status from a deleted cluster, ignore it
-				cluster.Status = models.StatusCreating
+			// Only check for deletion_requested if we don't have a deletion timestamp in config
+			// This prevents treating valid status as stale when cluster is being deleted
+			if _, hasDeletionRequested := status.Metadata["deletion_requested"]; hasDeletionRequested && config.Metadata.DeletionTimestamp == nil {
+				// This could be a stale status from a previous cluster with the same name
+				// However, if the status shows the cluster is running, trust it
+				if status.Phase == models.StatusRunning || status.Phase == "configuring" || status.Phase == "installing" {
+					// Cluster is actually running, use the status
+					cluster.Status = status.Phase
+					cluster.APIEndpoint = status.APIEndpoint
+					cluster.ClusterToken = status.ClusterToken
+				} else {
+					// Status shows cluster is not running, could be stale
+					cluster.Status = models.StatusCreating
+				}
 			} else {
 				// Add status if available and valid
 				cluster.Status = status.Phase
@@ -197,18 +210,36 @@ func ConvertFromClusterConfig(config *ClusterConfig, status *ClusterStatus) mode
 			} else {
 				// Update existing nodes
 				for i, node := range cluster.MasterNodes {
+					// Try exact match first
 					if instInfo, ok := status.Instances[node.Name]; ok {
 						cluster.MasterNodes[i].ID = instInfo.ID
 						cluster.MasterNodes[i].IP = instInfo.PrivateIP
 						cluster.MasterNodes[i].Status = instInfo.State
+					} else {
+						// Try with -0 suffix for dev mode clusters (single master)
+						nameWithSuffix := node.Name + "-0"
+						if instInfo, ok := status.Instances[nameWithSuffix]; ok {
+							cluster.MasterNodes[i].ID = instInfo.ID
+							cluster.MasterNodes[i].IP = instInfo.PrivateIP
+							cluster.MasterNodes[i].Status = instInfo.State
+						}
 					}
 				}
 				// Update worker nodes
 				for i, node := range cluster.WorkerNodes {
+					// Try exact match first
 					if instInfo, ok := status.Instances[node.Name]; ok {
 						cluster.WorkerNodes[i].ID = instInfo.ID
 						cluster.WorkerNodes[i].IP = instInfo.PrivateIP
 						cluster.WorkerNodes[i].Status = instInfo.State
+					} else {
+						// Try with index suffix for multiple workers
+						nameWithSuffix := fmt.Sprintf("%s-%d", node.Name, i)
+						if instInfo, ok := status.Instances[nameWithSuffix]; ok {
+							cluster.WorkerNodes[i].ID = instInfo.ID
+							cluster.WorkerNodes[i].IP = instInfo.PrivateIP
+							cluster.WorkerNodes[i].Status = instInfo.State
+						}
 					}
 				}
 			}

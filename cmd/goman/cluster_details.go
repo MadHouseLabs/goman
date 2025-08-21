@@ -7,6 +7,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	clusterPkg "github.com/madhouselabs/goman/pkg/cluster"
+	"github.com/madhouselabs/goman/pkg/logger"
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/rivo/tview"
 )
@@ -666,6 +667,9 @@ func fetchMetricsOnce() {
 			app.QueueUpdateDraw(func() {
 				updateMetricsTableData(cluster)
 			})
+		} else {
+			// Log the error for debugging
+			logger.Printf("Failed to fetch metrics for cluster %s: %v", cluster.Name, err)
 		}
 	}()
 }

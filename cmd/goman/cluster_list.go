@@ -233,6 +233,9 @@ func refreshClusters() {
 					AddItem(emptyPlaceholder, 0, 1, true).
 					AddItem(footerDivider, 1, 0, false).
 					AddItem(statusBarFlex, 1, 0, false)
+				
+				// Ensure the placeholder gets focus so key handlers work
+				app.SetFocus(emptyPlaceholder)
 			}
 			return
 		} else {
@@ -248,6 +251,9 @@ func refreshClusters() {
 					AddItem(clusterTable, 0, 1, true).
 					AddItem(footerDivider, 1, 0, false).
 					AddItem(statusBarFlex, 1, 0, false)
+				
+				// Ensure the table gets focus
+				app.SetFocus(clusterTable)
 			}
 		}
 	}
