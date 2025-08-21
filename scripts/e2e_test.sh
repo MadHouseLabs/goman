@@ -209,18 +209,18 @@ main() {
         print_error "Failed to get infrastructure status"
     fi
     
-    # Test cluster creation - Developer mode
-    print_section "Cluster Creation - Developer Mode"
-    print_info "Creating developer mode cluster in $PRIMARY_REGION..."
+    # Test cluster creation - Dev mode
+    print_section "Cluster Creation - Dev Mode"
+    print_info "Creating dev mode cluster in $PRIMARY_REGION..."
     ./goman cluster create "$TEST_CLUSTER_NAME" \
         --region="$PRIMARY_REGION" \
-        --mode=developer \
+        --mode=dev \
         --instance-type=t3.micro \
         --json | tee -a "$LOG_FILE"
     
     # Wait for cluster to be ready
     if ! wait_for_cluster_status "$TEST_CLUSTER_NAME" "running" 600; then
-        print_error "Developer cluster failed to reach running state"
+        print_error "Dev cluster failed to reach running state"
     fi
     
     # List clusters
@@ -276,7 +276,7 @@ main() {
     
     # Delete clusters
     print_section "Cluster Deletion"
-    print_info "Deleting developer mode cluster..."
+    print_info "Deleting dev mode cluster..."
     ./goman cluster delete "$TEST_CLUSTER_NAME" --json | tee -a "$LOG_FILE"
     
     print_info "Deleting HA mode cluster..."

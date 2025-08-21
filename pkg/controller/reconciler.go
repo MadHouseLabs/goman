@@ -8,7 +8,6 @@ import (
 	"time"
 	"gopkg.in/yaml.v3"
 
-	"github.com/madhouselabs/goman/pkg/config"
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/madhouselabs/goman/pkg/provider"
 )
@@ -68,7 +67,7 @@ func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (
 			
 			// Check if cluster still exists before requeueing
 			log.Printf("[LOAD] Checking if cluster %s still exists before requeue", clusterName)
-			configKey := fmt.Sprintf("clusters/%s/config.json", clusterName)
+			configKey := fmt.Sprintf("clusters/%s/config.yaml", clusterName)
 			_, configErr := r.provider.GetStorageService().GetObject(ctx, configKey)
 			if configErr != nil {
 				if strings.Contains(configErr.Error(), "not found") || strings.Contains(configErr.Error(), "NoSuchKey") {
@@ -185,9 +184,6 @@ func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (
 func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
 	log.Printf("[PROVISIONING] Starting infrastructure provisioning for cluster %s", resource.Name)
 	
-	// Get provider configuration
-	providerConfig := config.GetProviderConfig()
-
 	// Use compute service to create instances
 	computeService := r.provider.GetComputeService()
 
@@ -258,7 +254,7 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 	masterCount := resource.Spec.MasterCount
 	if masterCount == 0 {
 		// Default based on mode if not specified
-		masterCount = 1 // Default to developer mode
+		masterCount = 1 // Default to dev mode
 	}
 
 	// Check each expected node individually to handle placeholders correctly
@@ -362,10 +358,9 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 
 				instanceConfig := provider.InstanceConfig{
 					Name:         nodeName,
-					Region:       resource.Spec.Region, // Honor the region from cluster spec
+					Region:       resource.Spec.Region,
 					InstanceType: resource.Spec.InstanceType,
-					ImageID:      providerConfig.GetProviderImageID(r.provider.Name()),
-					// No KeyName needed - using Systems Manager or equivalent
+					// Provider will handle ImageID, UserData, InstanceProfile internally
 					Tags: map[string]string{
 						"ClusterName": resource.Name,
 						"ManagedBy":   "goman",
@@ -1102,6 +1097,10 @@ func mapPhaseToStatus(phase string) string {
 		return "running"
 	case models.ClusterPhaseProvisioning:
 		return "creating"
+	case models.ClusterPhaseInstalling:
+		return "installing"
+	case models.ClusterPhaseConfiguring:
+		return "configuring"
 	case models.ClusterPhaseFailed:
 		return "error"
 	case models.ClusterPhaseDeleting:

@@ -6,13 +6,32 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
+	clusterPkg "github.com/madhouselabs/goman/pkg/cluster"
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/rivo/tview"
 )
 
+// Global variable to track active metrics refresh goroutine
+var activeMetricsRefresh chan bool
+
 func showClusterDetails(cluster models.K3sCluster) {
+	
+	// Stop any existing metrics refresh goroutine
+	if activeMetricsRefresh != nil {
+		select {
+		case activeMetricsRefresh <- true:
+		default:
+		}
+		time.Sleep(100 * time.Millisecond) // Give goroutine time to exit
+	}
+	
 	// Create main flex container (same structure as listing page)
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	
+	// Channel to stop the refresh goroutine
+	stopRefresh := make(chan bool, 1)
+	activeMetricsRefresh = stopRefresh
+	
 	
 	// Create header with title (same style as listing page)
 	headerFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
@@ -273,12 +292,9 @@ func showClusterDetails(cluster models.K3sCluster) {
 	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" CPU Usage:").
 		SetTextColor(ColorMuted).
 		SetAlign(tview.AlignLeft))
-	// Calculate current CPU usage (simulated for now)
-	cpuUsage := "45%" // This would come from actual metrics
-	cpuColor := ColorSuccess
-	if strings.TrimSuffix(cpuUsage, "%") > "70" {
-		cpuColor = ColorWarning
-	}
+	// Static placeholder for CPU usage
+	cpuUsage := "N/A"
+	cpuColor := ColorMuted
 	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(cpuUsage).
 		SetTextColor(cpuColor).
 		SetAlign(tview.AlignLeft))
@@ -287,14 +303,33 @@ func showClusterDetails(cluster models.K3sCluster) {
 	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Memory Usage:").
 		SetTextColor(ColorMuted).
 		SetAlign(tview.AlignLeft))
-	// Calculate current memory usage (simulated for now)
-	memUsage := "62%" // This would come from actual metrics
-	memColor := ColorSuccess
-	if strings.TrimSuffix(memUsage, "%") > "70" {
-		memColor = ColorWarning
-	}
+	// Static placeholder for memory usage
+	memUsage := "N/A"
+	memColor := ColorMuted
 	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(memUsage).
 		SetTextColor(memColor).
+		SetAlign(tview.AlignLeft))
+	metricsRow++
+	
+	// Add Pod Count metric
+	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Pod Count:").
+		SetTextColor(ColorMuted).
+		SetAlign(tview.AlignLeft))
+	// Static placeholder for pod count
+	podCountStr := "N/A"
+	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(podCountStr).
+		SetTextColor(ColorForeground).
+		SetAlign(tview.AlignLeft))
+	metricsRow++
+	
+	// Add Last Updated timestamp
+	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Updated:").
+		SetTextColor(ColorMuted).
+		SetAlign(tview.AlignLeft))
+	// Static placeholder for update timestamp
+	updatedStr := "--"
+	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(updatedStr).
+		SetTextColor(ColorMuted).
 		SetAlign(tview.AlignLeft))
 	
 	// Create vertical dividers using TextView
@@ -432,7 +467,7 @@ func showClusterDetails(cluster models.K3sCluster) {
 	
 	// Always add control plane pool - this is mandatory for every cluster
 	controlPlaneCount := len(cluster.MasterNodes)
-	expectedControlPlaneCount := 1 // Default for developer mode
+	expectedControlPlaneCount := 1 // Default for dev mode
 	if string(cluster.Mode) == "ha" || cluster.Mode == models.ModeHA {
 		expectedControlPlaneCount = 3
 	}
@@ -644,8 +679,8 @@ func showClusterDetails(cluster models.K3sCluster) {
 	// Create content area with better organization
 	contentFlex := tview.NewFlex().SetDirection(tview.FlexRow)
 	
-	// Add sections container
-	contentFlex.AddItem(sectionsContainer, 10, 0, false)
+	// Add sections container with dynamic height
+	contentFlex.AddItem(sectionsContainer, 12, 0, false)
 	
 	// Add a divider
 	contentDivider := tview.NewTextView().
@@ -700,10 +735,17 @@ func showClusterDetails(cluster models.K3sCluster) {
 		AddItem(footerDivider, 1, 0, false).
 		AddItem(statusBarFlex, 1, 0, false)
 	
+	// Metrics refresh functionality has been removed
+	
 	// Handle keyboard input
 	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyEscape:
+			// Stop the refresh goroutine
+			select {
+			case stopRefresh <- true:
+			default:
+			}
 			pages.SwitchToPage("clusters")
 			go refreshClustersAsync()
 			return nil
@@ -716,7 +758,22 @@ func showClusterDetails(cluster models.K3sCluster) {
 				deleteCluster(cluster)
 				return nil
 			case 'r', 'R':
-				go refreshClustersAsync()
+				// Refresh - go back to cluster list and re-enter
+				pages.SwitchToPage("clusters")
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					// Get fresh cluster data
+					manager := clusterPkg.NewManager()
+					clusters := manager.GetClusters()
+					for _, c := range clusters {
+						if c.Name == cluster.Name {
+							app.QueueUpdateDraw(func() {
+								showClusterDetails(c)
+							})
+							break
+						}
+					}
+				}()
 				return nil
 			case 'k', 'K':
 				// Switch to this cluster (handles tunnel management)
@@ -727,6 +784,9 @@ func showClusterDetails(cluster models.K3sCluster) {
 		return event
 	})
 	
-	// Add and switch to details page
+	// Clear and switch to details page
+	// Remove any existing details page
+	pages.RemovePage("details")
+	// Add and switch to the new page
 	pages.AddAndSwitchToPage("details", flex, true)
 }

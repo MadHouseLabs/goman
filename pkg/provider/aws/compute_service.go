@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -27,6 +28,7 @@ type ComputeService struct {
 	instanceProfile string
 	accountID       string
 	regionClients   map[string]*ec2.Client // Cache of region-specific EC2 clients
+	regionSSMClients map[string]*ssm.Client // Cache of region-specific SSM clients
 }
 
 // NewComputeService creates a new EC2-based compute service
@@ -39,6 +41,7 @@ func NewComputeService(client *ec2.Client, iamClient *iam.Client, cfg aws.Config
 		instanceProfile: "goman-ssm-instance-profile",
 		accountID:       accountID,
 		regionClients:   make(map[string]*ec2.Client),
+		regionSSMClients: make(map[string]*ssm.Client),
 	}
 }
 
@@ -71,6 +74,30 @@ func (s *ComputeService) getEC2Client(region string) *ec2.Client {
 	cfg.Region = region
 	client := ec2.NewFromConfig(cfg)
 	s.regionClients[region] = client
+
+	return client
+}
+
+// getSSMClient returns an SSM client for the specified region
+func (s *ComputeService) getSSMClient(region string) *ssm.Client {
+	// If no region specified, use default client
+	if region == "" {
+		logger.Printf("Warning: No region specified, using default SSM client for region: %s", s.config.Region)
+		return s.ssmClient
+	}
+
+	// Check cache first
+	if client, exists := s.regionSSMClients[region]; exists {
+		logger.Printf("Using cached SSM client for region: %s", region)
+		return client
+	}
+
+	// Create new client for the region
+	logger.Printf("Creating new SSM client for region: %s", region)
+	cfg := s.config.Copy()
+	cfg.Region = region
+	client := ssm.NewFromConfig(cfg)
+	s.regionSSMClients[region] = client
 
 	return client
 }
@@ -179,7 +206,7 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 	}
 
 	// Check if instance profile exists
-	_, err = s.iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
+	profileResp, err := s.iamClient.GetInstanceProfile(ctx, &iam.GetInstanceProfileInput{
 		InstanceProfileName: aws.String(profileName),
 	})
 
@@ -203,30 +230,50 @@ func (s *ComputeService) ensureSSMInstanceProfile(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to add role to instance profile: %w", err)
 		}
+	} else {
+		// Instance profile exists, check if role is attached
+		hasRole := false
+		for _, role := range profileResp.InstanceProfile.Roles {
+			if aws.ToString(role.RoleName) == roleName {
+				hasRole = true
+				break
+			}
+		}
+		
+		if !hasRole {
+			// Add role to existing instance profile
+			_, err = s.iamClient.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
+				InstanceProfileName: aws.String(profileName),
+				RoleName:            aws.String(roleName),
+			})
+			if err != nil && !strings.Contains(err.Error(), "LimitExceeded") {
+				return fmt.Errorf("failed to add role to instance profile: %w", err)
+			}
+		}
 	}
 
 	return nil
 }
 
-// getLatestUbuntuAMI gets the latest Ubuntu 22.04 LTS AMI for the specified region
-func (s *ComputeService) getLatestUbuntuAMI(ctx context.Context, region string) (string, error) {
-	// Use SSM Parameter Store to get the latest Ubuntu 22.04 LTS AMI
+// getLatestAmazonLinux2AMI gets the latest Amazon Linux 2 AMI for the specified region
+func (s *ComputeService) getLatestAmazonLinux2AMI(ctx context.Context, region string) (string, error) {
+	// Use SSM Parameter Store to get the latest Amazon Linux 2 AMI
 	// AWS publishes these parameters in all regions
 	ssmClient := ssm.NewFromConfig(s.config.Copy(), func(o *ssm.Options) {
 		o.Region = region
 	})
 
-	// Parameter path for Ubuntu 22.04 LTS (Jammy) arm64/amd64
-	parameterName := "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
+	// Parameter path for Amazon Linux 2 (has SSM agent pre-installed and configured)
+	parameterName := "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
 
 	result, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
 		Name: aws.String(parameterName),
 	})
 
 	if err != nil {
-		logger.Printf("Failed to get Ubuntu AMI from SSM for region %s: %v", region, err)
-		// Fallback to Amazon Linux 2023 if Ubuntu parameter doesn't exist
-		parameterName = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+		logger.Printf("Failed to get Amazon Linux 2 AMI from SSM for region %s: %v", region, err)
+		// Fallback to Ubuntu if Amazon Linux 2 parameter doesn't exist
+		parameterName = "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
 		result, err = ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
 			Name: aws.String(parameterName),
 		})
@@ -275,13 +322,30 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 	config.SubnetID = networkInfo.SubnetID
 	config.SecurityGroups = []string{networkInfo.SecurityGroupID}
 
-	// Get region-specific AMI if not provided or if using default ap-south-1 AMI
-	if config.ImageID == "" || config.ImageID == "ami-0f5ee92e2d63afc18" || strings.HasPrefix(config.ImageID, "ami-ubuntu") {
-		amiID, err := s.getLatestUbuntuAMI(ctx, config.Region)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get AMI for region %s: %w", config.Region, err)
-		}
-		config.ImageID = amiID
+	// Always use Amazon Linux 2 AMI for AWS (provider-specific decision)
+	amiID, err := s.getLatestAmazonLinux2AMI(ctx, config.Region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AMI for region %s: %w", config.Region, err)
+	}
+	config.ImageID = amiID
+	
+	// AWS-specific: Always use SSM instance profile
+	if config.InstanceProfile == "" {
+		config.InstanceProfile = s.instanceProfile
+	}
+	
+	// AWS-specific: Add UserData to ensure SSM agent is running (for Amazon Linux 2)
+	if config.UserData == "" {
+		userDataScript := `#!/bin/bash
+# Amazon Linux 2 has SSM agent pre-installed
+# Just ensure it's enabled and running
+systemctl enable amazon-ssm-agent
+systemctl start amazon-ssm-agent
+
+# Log for debugging
+echo "Instance started at $(date)" >> /var/log/instance-startup.log
+`
+		config.UserData = base64.StdEncoding.EncodeToString([]byte(userDataScript))
 	}
 
 	// Run instance with retry logic
@@ -307,16 +371,9 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 			},
 		}
 
-		// Add IAM instance profile for SSM access
-		if config.InstanceProfile != "" {
-			runInstancesInput.IamInstanceProfile = &types.IamInstanceProfileSpecification{
-				Name: aws.String(config.InstanceProfile),
-			}
-		} else if s.instanceProfile != "" {
-			// Use default SSM instance profile if not specified
-			runInstancesInput.IamInstanceProfile = &types.IamInstanceProfileSpecification{
-				Name: aws.String(s.instanceProfile),
-			}
+		// Add IAM instance profile for SSM access (always set by now)
+		runInstancesInput.IamInstanceProfile = &types.IamInstanceProfileSpecification{
+			Name: aws.String(config.InstanceProfile),
 		}
 
 		result, runErr = ec2Client.RunInstances(ctx, runInstancesInput)
@@ -816,13 +873,41 @@ func (s *ComputeService) ensureNetworkInfrastructure(ctx context.Context, resour
 
 // RunCommand executes a command on instances using AWS Systems Manager
 func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, command string) (*provider.CommandResult, error) {
+	if len(instanceIDs) == 0 {
+		return nil, fmt.Errorf("no instance IDs provided")
+	}
+
+	// Detect the region of the first instance
+	// Assume all instances in the same command are in the same region
+	instanceRegion := ""
+	for region, client := range s.regionClients {
+		result, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+			InstanceIds: []string{instanceIDs[0]},
+		})
+		if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+			instanceRegion = region
+			logger.Printf("Detected instance %s in region %s", instanceIDs[0], region)
+			break
+		}
+	}
+
+	// Get the appropriate SSM client for the region
+	var ssmClient *ssm.Client
+	if instanceRegion != "" {
+		ssmClient = s.getSSMClient(instanceRegion)
+	} else {
+		// Fallback to default SSM client
+		logger.Printf("Could not detect region for instance %s, using default SSM client", instanceIDs[0])
+		ssmClient = s.ssmClient
+	}
+
 	// Check if SSM client is initialized
-	if s.ssmClient == nil {
+	if ssmClient == nil {
 		return nil, fmt.Errorf("SSM client not initialized - Systems Manager support not available")
 	}
 
 	// Send command to instances
-	result, err := s.ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+	result, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:  instanceIDs,
 		DocumentName: aws.String("AWS-RunShellScript"),
 		Parameters: map[string][]string{
@@ -851,7 +936,7 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 			return nil, fmt.Errorf("timeout waiting for command to complete")
 		case <-ticker.C:
 			// Get command invocations
-			invocations, err := s.ssmClient.ListCommandInvocations(waitCtx, &ssm.ListCommandInvocationsInput{
+			invocations, err := ssmClient.ListCommandInvocations(waitCtx, &ssm.ListCommandInvocationsInput{
 				CommandId: aws.String(commandID),
 			})
 
@@ -877,7 +962,7 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 				}
 
 				// Get command output
-				output, err := s.ssmClient.GetCommandInvocation(waitCtx, &ssm.GetCommandInvocationInput{
+				output, err := ssmClient.GetCommandInvocation(waitCtx, &ssm.GetCommandInvocationInput{
 					CommandId:  aws.String(commandID),
 					InstanceId: aws.String(instanceID),
 				})

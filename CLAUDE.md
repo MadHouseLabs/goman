@@ -25,7 +25,7 @@ task build:lambda      # Build Lambda package (build/lambda-aws-controller.zip)
 task run               # Build and run TUI
 ./goman               # Run TUI directly
 ./goman init          # Initialize AWS infrastructure
-./goman cluster create <name> --region=<region> --mode=<developer|ha>
+./goman cluster create <name> --region=<region> --mode=<dev|ha>
 
 # Testing
 task test             # Run all tests
@@ -53,7 +53,7 @@ task clean           # Remove build artifacts
 ### Immutable Fields
 The following cluster fields **cannot be changed** after creation:
 - **name**: Cluster name is immutable as it's used as the unique identifier
-- **mode**: Cluster mode (developer/ha) cannot be changed as it determines the number of master nodes (1 for developer, 3 for HA)
+- **mode**: Cluster mode (dev/ha) cannot be changed as it determines the number of master nodes (1 for dev, 3 for HA)
 
 When attempting to change these fields:
 - The UI will show a validation error as a comment at the top of the vim editor

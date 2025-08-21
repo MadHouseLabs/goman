@@ -73,7 +73,7 @@ task build
 ./goman status
 
 # Manage clusters via CLI
-./goman cluster create <name> --region=<region> --mode=<developer|ha> --wait --json
+./goman cluster create <name> --region=<region> --mode=<dev|ha> --wait --json
 ./goman cluster list [--region=<region>] [--json]
 ./goman cluster status <name> [--json]
 ./goman cluster delete <name> [--json]

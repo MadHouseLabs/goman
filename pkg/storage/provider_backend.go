@@ -108,9 +108,84 @@ func (pb *ProviderBackend) LoadClusterState(clusterName string) (*K3sClusterStat
 	statusKey := pb.getKey(fmt.Sprintf("clusters/%s/status.yaml", clusterName))
 	statusData, err := pb.storageService.GetObject(ctx, statusKey)
 	if err == nil {
-		status = &ClusterStatus{}
-		if err := yaml.Unmarshal(statusData, status); err != nil {
-			status = nil
+		// First try to unmarshal to check format
+		var rawStatus map[string]interface{}
+		if err := yaml.Unmarshal(statusData, &rawStatus); err == nil {
+			// Check if this is Lambda's format (with nested cluster.status)
+			if clusterData, ok := rawStatus["cluster"].(map[string]interface{}); ok {
+				status = &ClusterStatus{}
+				
+				// Extract status from cluster.status
+				if statusStr, ok := clusterData["status"].(string); ok {
+					// Map string status to ClusterStatus phase
+					switch statusStr {
+					case "running":
+						status.Phase = models.ClusterStatus("running")
+					case "creating":
+						status.Phase = models.ClusterStatus("creating")
+					case "pending":
+						status.Phase = models.ClusterStatus("creating")
+					case "error":
+						status.Phase = models.ClusterStatus("error")
+					case "deleting":
+						status.Phase = models.ClusterStatus("deleting")
+					case "stopped":
+						status.Phase = models.ClusterStatus("stopped")
+					default:
+						status.Phase = models.ClusterStatus("creating")
+					}
+				}
+				
+				// Extract metadata
+				if metadata, ok := rawStatus["metadata"].(map[string]interface{}); ok {
+					status.Metadata = metadata
+					if msg, ok := metadata["message"].(string); ok {
+						status.Message = msg
+					}
+				}
+				
+				// Extract instance IDs
+				if instanceIDs, ok := rawStatus["instance_ids"].(map[string]interface{}); ok {
+					status.InstanceIDs = make(map[string]string)
+					for k, v := range instanceIDs {
+						if id, ok := v.(string); ok {
+							status.InstanceIDs[k] = id
+						}
+					}
+				}
+				
+				// Extract instance info
+				if instances, ok := rawStatus["instances"].(map[string]interface{}); ok {
+					status.Instances = make(map[string]InstanceInfo)
+					for k, v := range instances {
+						if inst, ok := v.(map[string]interface{}); ok {
+							info := InstanceInfo{}
+							if id, ok := inst["id"].(string); ok {
+								info.ID = id
+							}
+							if ip, ok := inst["private_ip"].(string); ok {
+								info.PrivateIP = ip
+							}
+							if ip, ok := inst["public_ip"].(string); ok {
+								info.PublicIP = ip
+							}
+							if state, ok := inst["state"].(string); ok {
+								info.State = state
+							}
+							if role, ok := inst["role"].(string); ok {
+								info.Role = role
+							}
+							status.Instances[k] = info
+						}
+					}
+				}
+			} else {
+				// Try direct unmarshal for UI-created format
+				status = &ClusterStatus{}
+				if err := yaml.Unmarshal(statusData, status); err != nil {
+					status = nil
+				}
+			}
 		}
 	}
 	

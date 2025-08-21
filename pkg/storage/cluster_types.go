@@ -167,12 +167,58 @@ func ConvertFromClusterConfig(config *ClusterConfig, status *ClusterStatus) mode
 				cluster.Status = models.StatusCreating
 			}
 		}
+		
+		// Update nodes with instance information from status
+		if status.Instances != nil {
+			// If no nodes in config, create them from instances
+			if len(cluster.MasterNodes) == 0 && len(cluster.WorkerNodes) == 0 {
+				// Create nodes from instances
+				masterNodes := []models.Node{}
+				workerNodes := []models.Node{}
+				
+				for name, instInfo := range status.Instances {
+					node := models.Node{
+						Name:   name,
+						ID:     instInfo.ID,
+						IP:     instInfo.PrivateIP,
+						Status: instInfo.State,
+						Role:   models.NodeRole(instInfo.Role),
+					}
+					
+					if instInfo.Role == "master" {
+						masterNodes = append(masterNodes, node)
+					} else if instInfo.Role == "worker" {
+						workerNodes = append(workerNodes, node)
+					}
+				}
+				
+				cluster.MasterNodes = masterNodes
+				cluster.WorkerNodes = workerNodes
+			} else {
+				// Update existing nodes
+				for i, node := range cluster.MasterNodes {
+					if instInfo, ok := status.Instances[node.Name]; ok {
+						cluster.MasterNodes[i].ID = instInfo.ID
+						cluster.MasterNodes[i].IP = instInfo.PrivateIP
+						cluster.MasterNodes[i].Status = instInfo.State
+					}
+				}
+				// Update worker nodes
+				for i, node := range cluster.WorkerNodes {
+					if instInfo, ok := status.Instances[node.Name]; ok {
+						cluster.WorkerNodes[i].ID = instInfo.ID
+						cluster.WorkerNodes[i].IP = instInfo.PrivateIP
+						cluster.WorkerNodes[i].Status = instInfo.State
+					}
+				}
+			}
+		}
 	} else {
 		// Default status when no status file exists yet
 		cluster.Status = models.StatusCreating
 	}
 
-	// Calculate totals
+	// Calculate totals from nodes (will be 0 for now, replaced by live metrics)
 	for _, node := range cluster.MasterNodes {
 		cluster.TotalCPU += node.CPU
 		cluster.TotalMemoryGB += node.MemoryGB

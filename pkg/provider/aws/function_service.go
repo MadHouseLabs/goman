@@ -448,7 +448,15 @@ func (s *FunctionService) ensureIAMRole(ctx context.Context) (string, error) {
 					fmt.Sprintf("arn:aws:iam::%s:instance-profile/goman-ssm-instance-profile", s.accountID),
 				},
 			},
-			// SSM permissions for remote command execution and parameter access
+			// SSM permissions for discovering managed instances
+			{
+				"Effect": "Allow",
+				"Action": []string{
+					"ssm:DescribeInstanceInformation",
+				},
+				"Resource": "*", // DescribeInstanceInformation requires wildcard
+			},
+			// SSM permissions for remote command execution
 			{
 				"Effect": "Allow",
 				"Action": []string{

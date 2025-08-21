@@ -33,12 +33,12 @@ func (r *Reconciler) reconcileConfiguring(ctx context.Context, resource *models.
 	if resource.Spec.Mode == "ha" {
 		return r.configureHACluster(ctx, resource)
 	}
-	return r.configureDeveloperCluster(ctx, resource)
+	return r.configureDevCluster(ctx, resource)
 }
 
-// configureDeveloperCluster configures a single-master developer cluster
-func (r *Reconciler) configureDeveloperCluster(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
-	log.Printf("[CONFIGURING] Configuring developer mode cluster %s", resource.Name)
+// configureDevCluster configures a single-master dev cluster
+func (r *Reconciler) configureDevCluster(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
+	log.Printf("[CONFIGURING] Configuring dev mode cluster %s", resource.Name)
 
 	computeService := r.provider.GetComputeService()
 	storageService := r.provider.GetStorageService()
@@ -64,7 +64,7 @@ func (r *Reconciler) configureDeveloperCluster(ctx context.Context, resource *mo
 
 	log.Printf("[CONFIGURING] Starting K3s server on %s", masterNode.Name)
 
-	// Generate K3s server startup script for developer mode
+	// Generate K3s server startup script for dev mode
 	startScript := fmt.Sprintf(`#!/bin/bash
 set -e
 
@@ -973,3 +973,4 @@ func (r *Reconciler) checkK3sServiceStatus(ctx context.Context, instanceID strin
 	
 	return false, nil
 }
+

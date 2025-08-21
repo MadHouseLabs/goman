@@ -111,7 +111,7 @@ perfect for edge, IoT, CI, and development[::-]`)
 		case tcell.KeyEnter:
 			row, _ := clusterTable.GetSelection()
 			if row > 0 && row <= len(clusters) {
-				showClusterDetails(clusters[row-1])
+				showClusterDetailsNew(clusters[row-1])
 			}
 		case tcell.KeyRune:
 			switch event.Rune() {
@@ -298,7 +298,13 @@ func refreshClusters() {
 		clusterTable.SetCell(row, 0, tview.NewTableCell("  "+cluster.Name).SetExpansion(2))
 		clusterTable.SetCell(row, 1, tview.NewTableCell(string(cluster.Mode)).SetAlign(tview.AlignLeft).SetExpansion(1))
 		clusterTable.SetCell(row, 2, tview.NewTableCell(cluster.Region).SetAlign(tview.AlignLeft).SetExpansion(1))
-		clusterTable.SetCell(row, 3, tview.NewTableCell(string(cluster.Status)).SetTextColor(statusColor).SetAlign(tview.AlignCenter).SetExpansion(1))
+		
+		// Debug: ensure status is not empty
+		statusText := string(cluster.Status)
+		if statusText == "" {
+			statusText = "unknown"
+		}
+		clusterTable.SetCell(row, 3, tview.NewTableCell(statusText).SetTextColor(statusColor).SetAlign(tview.AlignCenter).SetExpansion(1))
 		clusterTable.SetCell(row, 4, tview.NewTableCell(fmt.Sprintf("%d", nodeCount)).SetAlign(tview.AlignCenter).SetExpansion(1))
 		clusterTable.SetCell(row, 5, tview.NewTableCell(connectedText).SetTextColor(connectedColor).SetAlign(tview.AlignCenter).SetExpansion(1))
 		clusterTable.SetCell(row, 6, tview.NewTableCell(created).SetAlign(tview.AlignLeft).SetExpansion(2))
