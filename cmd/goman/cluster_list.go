@@ -111,7 +111,7 @@ perfect for edge, IoT, CI, and development[::-]`)
 		case tcell.KeyEnter:
 			row, _ := clusterTable.GetSelection()
 			if row > 0 && row <= len(clusters) {
-				showClusterDetailsNew(clusters[row-1])
+				showClusterDetails(clusters[row-1])
 			}
 		case tcell.KeyRune:
 			switch event.Rune() {

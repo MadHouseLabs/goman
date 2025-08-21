@@ -13,7 +13,6 @@ type ClusterDetailsState struct {
 	mu              sync.RWMutex
 	cluster         models.K3sCluster
 	metrics         *clusterPkg.ClusterMetrics
-	fetchingMetrics bool
 	stopRefresh     chan bool
 	
 	// UI elements that need updating
@@ -61,20 +60,6 @@ func (s *ClusterDetailsState) GetMetrics() *clusterPkg.ClusterMetrics {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.metrics
-}
-
-// SetFetchingMetrics sets the fetching state
-func (s *ClusterDetailsState) SetFetchingMetrics(fetching bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.fetchingMetrics = fetching
-}
-
-// IsFetchingMetrics returns if metrics are being fetched
-func (s *ClusterDetailsState) IsFetchingMetrics() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.fetchingMetrics
 }
 
 // StopRefresh signals to stop the refresh goroutine

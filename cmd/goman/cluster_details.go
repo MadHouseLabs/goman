@@ -11,91 +11,382 @@ import (
 	"github.com/rivo/tview"
 )
 
-// Global variable to track active metrics refresh goroutine
-var activeMetricsRefresh chan bool
+// Global UI elements for the details page
+var (
+	detailsFlex      *tview.Flex
+	detailsInitialized = false
+)
 
 func showClusterDetails(cluster models.K3sCluster) {
-	
-	// Stop any existing metrics refresh goroutine
-	if activeMetricsRefresh != nil {
-		select {
-		case activeMetricsRefresh <- true:
-		default:
-		}
-		time.Sleep(100 * time.Millisecond) // Give goroutine time to exit
+	// Stop any existing refresh
+	if detailsState != nil {
+		detailsState.StopRefresh()
 	}
 	
-	// Create main flex container (same structure as listing page)
-	flex := tview.NewFlex().SetDirection(tview.FlexRow)
+	// Create or update the UI
+	if !detailsInitialized {
+		// Create new state only when creating UI for the first time
+		detailsState = NewClusterDetailsState(cluster)
+		createDetailsUI()
+		detailsInitialized = true
+	} else {
+		// If UI already exists, just update the cluster in existing state
+		if detailsState == nil {
+			detailsState = NewClusterDetailsState(cluster)
+		} else {
+			detailsState.UpdateCluster(cluster)
+		}
+	}
 	
-	// Channel to stop the refresh goroutine
-	stopRefresh := make(chan bool, 1)
-	activeMetricsRefresh = stopRefresh
+	// Update UI with cluster data (only after UI is created)
+	updateDetailsUI(cluster)
 	
+	// Start metrics refresh if cluster is running
+	if cluster.Status == models.StatusRunning {
+		startMetricsRefresh()
+	}
 	
-	// Create header with title (same style as listing page)
+	// Switch to details page
+	pages.RemovePage("details")
+	pages.AddAndSwitchToPage("details", detailsFlex, true)
+}
+
+func createDetailsUI() {
+	// Create main flex container
+	detailsFlex = tview.NewFlex().SetDirection(tview.FlexRow)
+	
+	// Create header with title
 	headerFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
 	
 	titleText := fmt.Sprintf(" %s%sCluster Details%s%s", TagBold, TagPrimary, TagReset, TagReset)
-	title := tview.NewTextView().
+	titleView := tview.NewTextView().
 		SetText(titleText).
 		SetTextAlign(tview.AlignLeft).
 		SetDynamicColors(true)
 	
-	// Cluster name and status on the right
-	statusColor := TagSuccess
-	statusIcon := "●"
-	if cluster.Status == "creating" {
-		statusColor = TagWarning
-		statusIcon = "◐"
-	} else if cluster.Status == "stopped" {
-		statusColor = TagMuted
-		statusIcon = "○"
-	}
-	
-	clusterInfoText := fmt.Sprintf("%s%s %s %s%s %s", TagBold, cluster.Name, TagReset, statusColor, statusIcon, strings.ToUpper(string(cluster.Status)))
-	clusterInfo := tview.NewTextView().
-		SetText(clusterInfoText).
+	// Status will be updated dynamically
+	detailsState.statusText = tview.NewTextView().
 		SetTextAlign(tview.AlignRight).
 		SetDynamicColors(true)
 	
 	headerFlex.
-		AddItem(title, 0, 1, false).
-		AddItem(clusterInfo, 0, 1, false)
+		AddItem(titleView, 0, 1, false).
+		AddItem(detailsState.statusText, 0, 1, false)
 	
 	// Header divider
-	headerDivider := tview.NewTextView().
+	headerDivider := createDivider()
+	
+	// Create the three info sections
+	sectionsContainer := tview.NewFlex().SetDirection(tview.FlexColumn)
+	
+	// Section 1: Cluster Info
+	detailsState.clusterInfoTable = createClusterInfoTable()
+	
+	// Section 2: Resources
+	detailsState.resourcesTable = createResourcesTable()
+	
+	// Section 3: Metrics
+	detailsState.metricsTable = createMetricsTable()
+	
+	// Add sections with dividers
+	divider1 := createVerticalDivider()
+	divider2 := createVerticalDivider()
+	
+	sectionsContainer.
+		AddItem(detailsState.clusterInfoTable, 0, 1, false).
+		AddItem(divider1, 3, 0, false).
+		AddItem(detailsState.resourcesTable, 0, 1, false).
+		AddItem(divider2, 3, 0, false).
+		AddItem(detailsState.metricsTable, 0, 1, false)
+	
+	// Create content area
+	contentFlex := tview.NewFlex().SetDirection(tview.FlexRow)
+	contentFlex.AddItem(sectionsContainer, 12, 0, false)
+	
+	// Add divider
+	contentDivider := createDivider()
+	contentFlex.AddItem(contentDivider, 1, 0, false)
+	
+	// Node pools section
+	poolsTitleFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
+	
+	poolsTitle := tview.NewTextView().
+		SetDynamicColors(true).
+		SetText(fmt.Sprintf("  %sNode Pools%s", TagPrimary, TagReset))
+	
+	poolsStats := tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignRight)
+	
+	poolsTitleFlex.
+		AddItem(poolsTitle, 0, 1, false).
+		AddItem(poolsStats, 0, 1, false)
+	
+	contentFlex.AddItem(poolsTitleFlex, 1, 0, false)
+	
+	// Node pools table
+	detailsState.nodePoolsTable = createNodePoolsTable()
+	contentFlex.AddItem(detailsState.nodePoolsTable, 0, 1, true)
+	
+	// Footer divider
+	footerDivider := createDivider()
+	
+	// Status bar
+	statusBarFlex := createStatusBar()
+	
+	// Build main layout
+	detailsFlex.
+		AddItem(headerFlex, 1, 0, false).
+		AddItem(headerDivider, 1, 0, false).
+		AddItem(contentFlex, 0, 1, true).
+		AddItem(footerDivider, 1, 0, false).
+		AddItem(statusBarFlex, 1, 0, false)
+	
+	// Handle keyboard input
+	detailsFlex.SetInputCapture(handleDetailsInput)
+}
+
+func createClusterInfoTable() *tview.Table {
+	table := tview.NewTable().
+		SetBorders(false).
+		SetSelectable(false, false).
+		SetFixed(1, 2)
+	
+	// Title
+	table.SetCell(0, 0, tview.NewTableCell(" [::b]Cluster Information").
+		SetTextColor(ColorPrimary).
+		SetAlign(tview.AlignLeft))
+	table.SetCell(0, 1, tview.NewTableCell(""))
+	
+	// Add rows for each field
+	row := 1
+	fields := []string{"Name:", "Status:", "Mode:", "Region:", "Created:", "Updated:"}
+	for _, field := range fields {
+		table.SetCell(row, 0, tview.NewTableCell(" "+field).
+			SetTextColor(ColorMuted).
+			SetAlign(tview.AlignLeft))
+		table.SetCell(row, 1, tview.NewTableCell("").
+			SetTextColor(ColorForeground).
+			SetAlign(tview.AlignLeft))
+		row++
+	}
+	
+	return table
+}
+
+func createResourcesTable() *tview.Table {
+	table := tview.NewTable().
+		SetBorders(false).
+		SetSelectable(false, false).
+		SetFixed(1, 2)
+	
+	// Title
+	table.SetCell(0, 0, tview.NewTableCell(" [::b]Resources").
+		SetTextColor(ColorPrimary).
+		SetAlign(tview.AlignLeft))
+	table.SetCell(0, 1, tview.NewTableCell(""))
+	
+	// Add rows for each field
+	row := 1
+	fields := []string{"Master Nodes:", "Worker Nodes:", "Total Nodes:", "Total CPU:", "Total Memory:", "Total Storage:"}
+	for _, field := range fields {
+		table.SetCell(row, 0, tview.NewTableCell(" "+field).
+			SetTextColor(ColorMuted).
+			SetAlign(tview.AlignLeft))
+		table.SetCell(row, 1, tview.NewTableCell("").
+			SetTextColor(ColorForeground).
+			SetAlign(tview.AlignLeft))
+		row++
+	}
+	
+	return table
+}
+
+func createMetricsTable() *tview.Table {
+	table := tview.NewTable().
+		SetBorders(false).
+		SetSelectable(false, false).
+		SetFixed(1, 2)
+	
+	// Title
+	table.SetCell(0, 0, tview.NewTableCell(" [::b]Metrics").
+		SetTextColor(ColorPrimary).
+		SetAlign(tview.AlignLeft))
+	table.SetCell(0, 1, tview.NewTableCell(""))
+	
+	// Add rows for each field
+	row := 1
+	fields := []string{"Uptime:", "Nodes Health:", "CPU Usage:", "Memory Usage:", "Pod Count:", "Updated:"}
+	for _, field := range fields {
+		table.SetCell(row, 0, tview.NewTableCell(" "+field).
+			SetTextColor(ColorMuted).
+			SetAlign(tview.AlignLeft))
+		table.SetCell(row, 1, tview.NewTableCell("").
+			SetTextColor(ColorForeground).
+			SetAlign(tview.AlignLeft))
+		row++
+	}
+	
+	return table
+}
+
+func createNodePoolsTable() *tview.Table {
+	table := tview.NewTable().
+		SetBorders(false).
+		SetSelectable(true, false).
+		SetSeparator(' ').
+		SetSelectedStyle(StyleHighlight)
+	
+	// Add headers
+	headers := []string{"  Pool Name", "Role", "Nodes", "Instance Type", "CPU", "Memory", "Status"}
+	for col, header := range headers {
+		alignment := tview.AlignLeft
+		if col > 1 && col < 6 {
+			alignment = tview.AlignCenter
+		}
+		cell := tview.NewTableCell(header).
+			SetTextColor(ColorPrimary).
+			SetAlign(alignment).
+			SetSelectable(false).
+			SetExpansion(1)
+		table.SetCell(0, col, cell)
+	}
+	
+	return table
+}
+
+func createDivider() *tview.TextView {
+	divider := tview.NewTextView().
 		SetText(string(CharDivider)).
-		SetTextColor(ColorMuted).
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := x; i < x+width; i++ {
-				screen.SetContent(i, y, CharDivider, nil, StyleMuted)
-			}
-			return 0, 0, 0, 0
-		})
+		SetTextColor(ColorMuted)
+	divider.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
+		for i := x; i < x+width; i++ {
+			screen.SetContent(i, y, CharDivider, nil, StyleMuted)
+		}
+		return 0, 0, 0, 0
+	})
+	return divider
+}
+
+func createVerticalDivider() *tview.TextView {
+	divider := tview.NewTextView().
+		SetText("")
+	divider.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
+		for i := y; i < y+height; i++ {
+			screen.SetContent(x+1, i, '│', nil, StyleMuted)
+		}
+		return 0, 0, 0, 0
+	})
+	return divider
+}
+
+func createStatusBar() *tview.Flex {
+	statusBarFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
+	
+	connectionStatus := tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	
+	shortcuts := fmt.Sprintf("%s%c%s Back  %sEnter%s Select  %sk%s Select  %se%s Edit  %sd%s Delete  %sr%s Refresh ",
+		TagPrimary, CharArrowLeft, TagReset,
+		TagPrimary, TagReset,
+		TagPrimary, TagReset,
+		TagPrimary, TagReset,
+		TagPrimary, TagReset,
+		TagPrimary, TagReset)
+	statusRight := tview.NewTextView().
+		SetText(shortcuts).
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignRight)
+	
+	statusBarFlex.
+		AddItem(connectionStatus, 0, 1, false).
+		AddItem(statusRight, 0, 2, false)
+	
+	return statusBarFlex
+}
+
+func updateDetailsUI(cluster models.K3sCluster) {
+	if detailsState == nil {
+		return
+	}
+	
+	// Update status text
+	if detailsState.statusText != nil {
+		statusColor := TagSuccess
+		statusIcon := "●"
+		if cluster.Status == "creating" {
+			statusColor = TagWarning
+			statusIcon = "◐"
+		} else if cluster.Status == "stopped" {
+			statusColor = TagMuted
+			statusIcon = "○"
+		}
+		
+		statusText := fmt.Sprintf("%s%s %s %s%s %s", TagBold, cluster.Name, TagReset, statusColor, statusIcon, strings.ToUpper(string(cluster.Status)))
+		detailsState.statusText.SetText(statusText)
+	}
+	
+	// Update cluster info table
+	updateClusterInfoTable(cluster)
+	
+	// Update resources table
+	updateResourcesTableData(cluster)
+	
+	// Update metrics table (initial static values)
+	updateMetricsTableData(cluster)
+	
+	// Update node pools table
+	updateNodePoolsTableData(cluster)
+}
+
+func updateClusterInfoTable(cluster models.K3sCluster) {
+	table := detailsState.clusterInfoTable
+	if table == nil {
+		return
+	}
+	
+	table.SetCell(1, 1, tview.NewTableCell(cluster.Name))
+	
+	statusColor := getStatusColor(string(cluster.Status))
+	table.SetCell(2, 1, tview.NewTableCell(string(cluster.Status)).SetTextColor(statusColor))
+	
+	table.SetCell(3, 1, tview.NewTableCell(strings.ToUpper(string(cluster.Mode))))
+	table.SetCell(4, 1, tview.NewTableCell(cluster.Region))
+	table.SetCell(5, 1, tview.NewTableCell(cluster.CreatedAt.Format("2006-01-02 15:04")))
+	table.SetCell(6, 1, tview.NewTableCell(cluster.UpdatedAt.Format("2006-01-02 15:04")))
+}
+
+func updateResourcesTableData(cluster models.K3sCluster) {
+	table := detailsState.resourcesTable
+	if table == nil {
+		return
+	}
 	
 	// Calculate totals
 	totalNodes := len(cluster.MasterNodes) + len(cluster.WorkerNodes)
 	totalCPU := 0
 	totalMemory := 0
 	totalStorage := 0
+	
 	for _, node := range cluster.MasterNodes {
 		if node.CPU > 0 {
 			totalCPU += node.CPU
 		} else {
-			totalCPU += 2 // default
+			totalCPU += 2
 		}
 		if node.MemoryGB > 0 {
 			totalMemory += node.MemoryGB
 		} else {
-			totalMemory += 4 // default
+			totalMemory += 4
 		}
 		if node.StorageGB > 0 {
 			totalStorage += node.StorageGB
 		} else {
-			totalStorage += 20 // default
+			totalStorage += 20
 		}
 	}
+	
 	for _, node := range cluster.WorkerNodes {
 		if node.CPU > 0 {
 			totalCPU += node.CPU
@@ -114,360 +405,120 @@ func showClusterDetails(cluster models.K3sCluster) {
 		}
 	}
 	
-	// Create three sections: Cluster Info, Resources, Metrics
+	table.SetCell(1, 1, tview.NewTableCell(fmt.Sprintf("%d", len(cluster.MasterNodes))).SetTextColor(ColorAccent))
+	table.SetCell(2, 1, tview.NewTableCell(fmt.Sprintf("%d", len(cluster.WorkerNodes))).SetTextColor(ColorAccent))
+	table.SetCell(3, 1, tview.NewTableCell(fmt.Sprintf("%d", totalNodes)).SetTextColor(ColorSuccess))
+	table.SetCell(4, 1, tview.NewTableCell(fmt.Sprintf("%d vCPUs", totalCPU)))
+	table.SetCell(5, 1, tview.NewTableCell(fmt.Sprintf("%d GB", totalMemory)))
+	table.SetCell(6, 1, tview.NewTableCell(fmt.Sprintf("%d GB", totalStorage)))
+}
+
+func updateMetricsTableData(cluster models.K3sCluster) {
+	table := detailsState.metricsTable
+	if table == nil {
+		return
+	}
 	
-	// Section 1: Cluster Info
-	clusterInfoTable := tview.NewTable().
-		SetBorders(false).
-		SetSelectable(false, false).
-		SetFixed(1, 2)
-	
-	// Title spans both columns with padding
-	clusterInfoTable.SetCell(0, 0, tview.NewTableCell(" [::b]Cluster Information").
-		SetTextColor(ColorPrimary).
-		SetAlign(tview.AlignLeft))
-	clusterInfoTable.SetCell(0, 1, tview.NewTableCell(""))
-	
-	// Cluster info data with proper alignment
-	infoRow := 1
-	clusterInfoTable.SetCell(infoRow, 0, tview.NewTableCell(" Name:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	clusterInfoTable.SetCell(infoRow, 1, tview.NewTableCell(cluster.Name).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	infoRow++
-	
-	statusColor2 := getStatusColor(string(cluster.Status))
-	clusterInfoTable.SetCell(infoRow, 0, tview.NewTableCell(" Status:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	clusterInfoTable.SetCell(infoRow, 1, tview.NewTableCell(string(cluster.Status)).
-		SetTextColor(statusColor2).
-		SetAlign(tview.AlignLeft))
-	infoRow++
-	
-	clusterInfoTable.SetCell(infoRow, 0, tview.NewTableCell(" Mode:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	clusterInfoTable.SetCell(infoRow, 1, tview.NewTableCell(strings.ToUpper(string(cluster.Mode))).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	infoRow++
-	
-	clusterInfoTable.SetCell(infoRow, 0, tview.NewTableCell(" Region:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	clusterInfoTable.SetCell(infoRow, 1, tview.NewTableCell(cluster.Region).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	infoRow++
-	
-	clusterInfoTable.SetCell(infoRow, 0, tview.NewTableCell(" Created:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	clusterInfoTable.SetCell(infoRow, 1, tview.NewTableCell(cluster.CreatedAt.Format("2006-01-02 15:04")).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	infoRow++
-	
-	clusterInfoTable.SetCell(infoRow, 0, tview.NewTableCell(" Updated:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	clusterInfoTable.SetCell(infoRow, 1, tview.NewTableCell(cluster.UpdatedAt.Format("2006-01-02 15:04")).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	
-	// Section 2: Resources  
-	resourcesTable := tview.NewTable().
-		SetBorders(false).
-		SetSelectable(false, false).
-		SetFixed(1, 2)
-	
-	// Title spans both columns with padding
-	resourcesTable.SetCell(0, 0, tview.NewTableCell(" [::b]Resources").
-		SetTextColor(ColorPrimary).
-		SetAlign(tview.AlignLeft))
-	resourcesTable.SetCell(0, 1, tview.NewTableCell(""))
-	
-	// Resources data with proper alignment
-	resourceRow := 1
-	resourcesTable.SetCell(resourceRow, 0, tview.NewTableCell(" Master Nodes:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	resourcesTable.SetCell(resourceRow, 1, tview.NewTableCell(fmt.Sprintf("%d", len(cluster.MasterNodes))).
-		SetTextColor(ColorAccent).
-		SetAlign(tview.AlignLeft))
-	resourceRow++
-	
-	resourcesTable.SetCell(resourceRow, 0, tview.NewTableCell(" Worker Nodes:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	resourcesTable.SetCell(resourceRow, 1, tview.NewTableCell(fmt.Sprintf("%d", len(cluster.WorkerNodes))).
-		SetTextColor(ColorAccent).
-		SetAlign(tview.AlignLeft))
-	resourceRow++
-	
-	resourcesTable.SetCell(resourceRow, 0, tview.NewTableCell(" Total Nodes:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	resourcesTable.SetCell(resourceRow, 1, tview.NewTableCell(fmt.Sprintf("%d", totalNodes)).
-		SetTextColor(ColorSuccess).
-		SetAlign(tview.AlignLeft))
-	resourceRow++
-	
-	resourcesTable.SetCell(resourceRow, 0, tview.NewTableCell(" Total CPU:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	resourcesTable.SetCell(resourceRow, 1, tview.NewTableCell(fmt.Sprintf("%d vCPUs", totalCPU)).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	resourceRow++
-	
-	resourcesTable.SetCell(resourceRow, 0, tview.NewTableCell(" Total Memory:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	resourcesTable.SetCell(resourceRow, 1, tview.NewTableCell(fmt.Sprintf("%d GB", totalMemory)).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	resourceRow++
-	
-	resourcesTable.SetCell(resourceRow, 0, tview.NewTableCell(" Total Storage:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	resourcesTable.SetCell(resourceRow, 1, tview.NewTableCell(fmt.Sprintf("%d GB", totalStorage)).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	resourceRow++
-	
-	// Section 3: Metrics
-	metricsTable := tview.NewTable().
-		SetBorders(false).
-		SetSelectable(false, false).
-		SetFixed(1, 2)
-	
-	// Title spans both columns with padding
-	metricsTable.SetCell(0, 0, tview.NewTableCell(" [::b]Metrics").
-		SetTextColor(ColorPrimary).
-		SetAlign(tview.AlignLeft))
-	metricsTable.SetCell(0, 1, tview.NewTableCell(""))
-	
-	// Metrics data
-	metricsRow := 1
-	
-	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Uptime:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
+	// Uptime
 	uptime := time.Since(cluster.CreatedAt)
 	uptimeStr := fmt.Sprintf("%d days, %d hours", int(uptime.Hours()/24), int(uptime.Hours())%24)
-	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(uptimeStr).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	metricsRow++
+	table.SetCell(1, 1, tview.NewTableCell(uptimeStr))
 	
-	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Nodes Health:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	runningNodes := 0
-	for _, node := range cluster.MasterNodes {
-		if node.Status == "running" {
-			runningNodes++
+	// Nodes Health
+	metrics := detailsState.GetMetrics()
+	if metrics != nil && metrics.NodesTotal > 0 {
+		healthStr := fmt.Sprintf("%d/%d Running", metrics.NodesReady, metrics.NodesTotal)
+		healthColor := ColorSuccess
+		if metrics.NodesReady < metrics.NodesTotal {
+			healthColor = ColorWarning
 		}
-	}
-	for _, node := range cluster.WorkerNodes {
-		if node.Status == "running" {
-			runningNodes++
-		}
-	}
-	healthStr := fmt.Sprintf("%d/%d Running", runningNodes, totalNodes)
-	healthColor := ColorSuccess
-	if runningNodes < totalNodes {
-		healthColor = ColorWarning
-	}
-	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(healthStr).
-		SetTextColor(healthColor).
-		SetAlign(tview.AlignLeft))
-	metricsRow++
-	
-	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" CPU Usage:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	// Static placeholder for CPU usage
-	cpuUsage := "N/A"
-	cpuColor := ColorMuted
-	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(cpuUsage).
-		SetTextColor(cpuColor).
-		SetAlign(tview.AlignLeft))
-	metricsRow++
-	
-	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Memory Usage:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	// Static placeholder for memory usage
-	memUsage := "N/A"
-	memColor := ColorMuted
-	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(memUsage).
-		SetTextColor(memColor).
-		SetAlign(tview.AlignLeft))
-	metricsRow++
-	
-	// Add Pod Count metric
-	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Pod Count:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	// Static placeholder for pod count
-	podCountStr := "N/A"
-	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(podCountStr).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	metricsRow++
-	
-	// Add Last Updated timestamp
-	metricsTable.SetCell(metricsRow, 0, tview.NewTableCell(" Updated:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	// Static placeholder for update timestamp
-	updatedStr := "--"
-	metricsTable.SetCell(metricsRow, 1, tview.NewTableCell(updatedStr).
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	
-	// Create vertical dividers using TextView
-	divider1 := tview.NewTextView().
-		SetText("").
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := y; i < y+height; i++ {
-				screen.SetContent(x+1, i, '│', nil, StyleMuted)
+		table.SetCell(2, 1, tview.NewTableCell(healthStr).SetTextColor(healthColor))
+	} else {
+		totalNodes := len(cluster.MasterNodes) + len(cluster.WorkerNodes)
+		runningNodes := 0
+		for _, node := range cluster.MasterNodes {
+			if node.Status == "running" {
+				runningNodes++
 			}
-			return 0, 0, 0, 0
-		})
-	
-	divider2 := tview.NewTextView().
-		SetText("").
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := y; i < y+height; i++ {
-				screen.SetContent(x+1, i, '│', nil, StyleMuted)
+		}
+		for _, node := range cluster.WorkerNodes {
+			if node.Status == "running" {
+				runningNodes++
 			}
-			return 0, 0, 0, 0
-		})
-	
-	// Section 4: Connection Info
-	connectionTable := tview.NewTable().
-		SetBorders(false).
-		SetSelectable(false, false).
-		SetFixed(1, 2)
-	
-	// Title
-	connectionTable.SetCell(0, 0, tview.NewTableCell(" [::b]Connection").
-		SetTextColor(ColorPrimary).
-		SetAlign(tview.AlignLeft))
-	connectionTable.SetCell(0, 1, tview.NewTableCell(""))
-	
-	// Connection data
-	connRow := 1
-	
-	// Get master instance for connection
-	masterInstanceID := ""
-	if len(cluster.MasterNodes) > 0 {
-		masterInstanceID = cluster.MasterNodes[0].ID
+		}
+		healthStr := fmt.Sprintf("%d/%d Running", runningNodes, totalNodes)
+		healthColor := ColorSuccess
+		if runningNodes < totalNodes {
+			healthColor = ColorWarning
+		}
+		table.SetCell(2, 1, tview.NewTableCell(healthStr).SetTextColor(healthColor))
 	}
 	
-	connectionTable.SetCell(connRow, 0, tview.NewTableCell(" Connect:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	connectionTable.SetCell(connRow, 1, tview.NewTableCell(fmt.Sprintf("goman kubectl connect %s", cluster.Name)).
-		SetTextColor(ColorAccent).
-		SetAlign(tview.AlignLeft))
-	connRow++
+	// CPU Usage
+	if metrics != nil && metrics.TotalCPU > 0 {
+		cpuPercent := (metrics.UsedCPU / metrics.TotalCPU) * 100
+		cpuStr := fmt.Sprintf("%.1f%% (%.1f/%.1f vCPUs)", cpuPercent, metrics.UsedCPU, metrics.TotalCPU)
+		cpuColor := ColorSuccess
+		if cpuPercent > 70 {
+			cpuColor = ColorWarning
+		}
+		if cpuPercent > 90 {
+			cpuColor = ColorDanger
+		}
+		table.SetCell(3, 1, tview.NewTableCell(cpuStr).SetTextColor(cpuColor))
+	} else {
+		table.SetCell(3, 1, tview.NewTableCell("N/A").SetTextColor(ColorMuted))
+	}
 	
-	connectionTable.SetCell(connRow, 0, tview.NewTableCell(" Master:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	connectionTable.SetCell(connRow, 1, tview.NewTableCell(masterInstanceID).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
-	connRow++
+	// Memory Usage
+	if metrics != nil && metrics.TotalMemoryGB > 0 {
+		memPercent := (metrics.UsedMemoryGB / metrics.TotalMemoryGB) * 100
+		memStr := fmt.Sprintf("%.1f%% (%.1f/%.1f GB)", memPercent, metrics.UsedMemoryGB, metrics.TotalMemoryGB)
+		memColor := ColorSuccess
+		if memPercent > 70 {
+			memColor = ColorWarning
+		}
+		if memPercent > 90 {
+			memColor = ColorDanger
+		}
+		table.SetCell(4, 1, tview.NewTableCell(memStr).SetTextColor(memColor))
+	} else {
+		table.SetCell(4, 1, tview.NewTableCell("N/A").SetTextColor(ColorMuted))
+	}
 	
-	connectionTable.SetCell(connRow, 0, tview.NewTableCell(" Method:").
-		SetTextColor(ColorMuted).
-		SetAlign(tview.AlignLeft))
-	connectionTable.SetCell(connRow, 1, tview.NewTableCell("SSM Port Forward").
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft))
+	// Pod Count
+	if metrics != nil && metrics.PodCount > 0 {
+		table.SetCell(5, 1, tview.NewTableCell(fmt.Sprintf("%d", metrics.PodCount)).SetTextColor(ColorAccent))
+	} else {
+		table.SetCell(5, 1, tview.NewTableCell("N/A").SetTextColor(ColorMuted))
+	}
 	
-	// Create a horizontal flex to arrange the three sections with dividers
-	sectionsContainer := tview.NewFlex().SetDirection(tview.FlexColumn)
-	sectionsContainer.AddItem(clusterInfoTable, 0, 1, false)
-	sectionsContainer.AddItem(divider1, 3, 0, false)
-	sectionsContainer.AddItem(resourcesTable, 0, 1, false)
-	sectionsContainer.AddItem(divider2, 3, 0, false)
-	sectionsContainer.AddItem(metricsTable, 0, 1, false)
+	// Updated timestamp
+	if metrics != nil && !metrics.LastUpdated.IsZero() {
+		table.SetCell(6, 1, tview.NewTableCell(metrics.LastUpdated.Format("15:04:05")).SetTextColor(ColorMuted))
+	} else {
+		table.SetCell(6, 1, tview.NewTableCell("--").SetTextColor(ColorMuted))
+	}
+}
+
+func updateNodePoolsTableData(cluster models.K3sCluster) {
+	table := detailsState.nodePoolsTable
+	if table == nil {
+		return
+	}
 	
-	// Calculate node statistics first
-	totalNodes = len(cluster.MasterNodes) + len(cluster.WorkerNodes)
-	runningCount := 0
-	stoppedCount := 0
-	provisioningCount := 0
-	
-	// Count master node states
-	for _, node := range cluster.MasterNodes {
-		switch node.Status {
-		case "running":
-			runningCount++
-		case "stopped":
-			stoppedCount++
-		default:
-			provisioningCount++
+	// Clear existing rows (except header)
+	for row := 1; row < table.GetRowCount(); row++ {
+		for col := 0; col < 7; col++ {
+			table.SetCell(row, col, nil)
 		}
 	}
 	
-	// Count worker node states
-	for _, node := range cluster.WorkerNodes {
-		switch node.Status {
-		case "running":
-			runningCount++
-		case "stopped":
-			stoppedCount++
-		default:
-			provisioningCount++
-		}
-	}
-	
-	// Calculate expected nodes (min/max)
-	minNodes := 1 // At least 1 master
-	maxNodes := totalNodes // Current total (can be expanded)
-	if string(cluster.Mode) == "ha" || cluster.Mode == models.ModeHA {
-		minNodes = 3 // HA mode requires 3 masters minimum
-	}
-	
-	// Create node pools table with same design as cluster list
-	nodePoolsTable := tview.NewTable().
-		SetBorders(false).
-		SetSelectable(true, false).
-		SetSeparator(' ').
-		SetSelectedStyle(StyleHighlight)
-	
-	// Add headers - same style as cluster list with proper spacing
-	headers := []string{"  Pool Name", "Role", "Nodes", "Instance Type", "CPU", "Memory", "Status"}
-	for col, header := range headers {
-		alignment := tview.AlignLeft
-		if col > 1 && col < 6 { // Center align numeric columns
-			alignment = tview.AlignCenter
-		}
-		cell := tview.NewTableCell(header).
-			SetTextColor(ColorPrimary).
-			SetAlign(alignment).
-			SetSelectable(false).
-			SetExpansion(1)
-		nodePoolsTable.SetCell(0, col, cell)
-	}
-	
-	// Add control plane pool (always shown as it's a default pool)
 	poolRow := 1
 	
-	// Always add control plane pool - this is mandatory for every cluster
+	// Control plane pool
 	controlPlaneCount := len(cluster.MasterNodes)
-	expectedControlPlaneCount := 1 // Default for dev mode
+	expectedControlPlaneCount := 1
 	if string(cluster.Mode) == "ha" || cluster.Mode == models.ModeHA {
 		expectedControlPlaneCount = 3
 	}
@@ -481,106 +532,28 @@ func showClusterDetails(cluster models.K3sCluster) {
 	} else if controlPlaneCount < expectedControlPlaneCount {
 		controlPlaneStatus = fmt.Sprintf("Scaling (%d/%d)", controlPlaneCount, expectedControlPlaneCount)
 		controlPlaneColor = ColorWarning
-	} else {
-		// Check if any master is not running
-		for _, node := range cluster.MasterNodes {
-			if node.Status != "running" {
-				controlPlaneStatus = "Provisioning"
-				controlPlaneColor = ColorWarning
-				break
-			}
-		}
 	}
 	
-	// Get control plane instance type
-	controlPlaneInstanceType := cluster.InstanceType
-	if controlPlaneInstanceType == "" {
-		controlPlaneInstanceType = "t3.medium"
-	}
-	if len(cluster.MasterNodes) > 0 && cluster.MasterNodes[0].InstanceType != "" {
-		controlPlaneInstanceType = cluster.MasterNodes[0].InstanceType
+	instanceType := cluster.InstanceType
+	if instanceType == "" {
+		instanceType = "t3.medium"
 	}
 	
-	// Calculate control plane resources (show expected if no nodes yet)
-	controlPlaneCPU := controlPlaneCount * 2
-	controlPlaneMemory := controlPlaneCount * 4
-	
-	// If no nodes yet, show expected resources
-	if controlPlaneCount == 0 {
-		// Show expected resources based on instance type
-		if controlPlaneInstanceType == "t3.medium" {
-			controlPlaneCPU = expectedControlPlaneCount * 2
-			controlPlaneMemory = expectedControlPlaneCount * 4
-		} else if controlPlaneInstanceType == "t3.large" {
-			controlPlaneCPU = expectedControlPlaneCount * 2
-			controlPlaneMemory = expectedControlPlaneCount * 8
-		} else if controlPlaneInstanceType == "t3.xlarge" {
-			controlPlaneCPU = expectedControlPlaneCount * 4
-			controlPlaneMemory = expectedControlPlaneCount * 16
-		}
-	} else if len(cluster.MasterNodes) > 0 {
-		if cluster.MasterNodes[0].CPU > 0 {
-			controlPlaneCPU = controlPlaneCount * cluster.MasterNodes[0].CPU
-		}
-		if cluster.MasterNodes[0].MemoryGB > 0 {
-			controlPlaneMemory = controlPlaneCount * cluster.MasterNodes[0].MemoryGB
-		}
-	}
-	
-	nodePoolsTable.SetCell(poolRow, 0, tview.NewTableCell("  control-plane").
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignLeft).
-		SetExpansion(1))
-	nodePoolsTable.SetCell(poolRow, 1, tview.NewTableCell("Control Plane").
-		SetTextColor(ColorPrimary).
-		SetAlign(tview.AlignLeft).
-		SetExpansion(1))
-	
-	// Show expected count if different from actual
-	nodeCountText := fmt.Sprintf("%d", controlPlaneCount)
-	if controlPlaneCount != expectedControlPlaneCount {
-		nodeCountText = fmt.Sprintf("%d/%d", controlPlaneCount, expectedControlPlaneCount)
-	}
-	nodePoolsTable.SetCell(poolRow, 2, tview.NewTableCell(nodeCountText).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignCenter).
-		SetExpansion(1))
-	nodePoolsTable.SetCell(poolRow, 3, tview.NewTableCell(controlPlaneInstanceType).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignCenter).
-		SetExpansion(1))
-	
-	// Show CPU and Memory (even if 0)
-	cpuText := fmt.Sprintf("%d", controlPlaneCPU)
-	if controlPlaneCPU == 0 {
-		cpuText = fmt.Sprintf("%d", expectedControlPlaneCount*2) // Default 2 vCPUs per node
-	}
-	memText := fmt.Sprintf("%d GB", controlPlaneMemory)
-	if controlPlaneMemory == 0 {
-		memText = fmt.Sprintf("%d GB", expectedControlPlaneCount*4) // Default 4 GB per node
-	}
-	
-	nodePoolsTable.SetCell(poolRow, 4, tview.NewTableCell(cpuText).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignCenter).
-		SetExpansion(1))
-	nodePoolsTable.SetCell(poolRow, 5, tview.NewTableCell(memText).
-		SetTextColor(ColorForeground).
-		SetAlign(tview.AlignCenter).
-		SetExpansion(1))
-	nodePoolsTable.SetCell(poolRow, 6, tview.NewTableCell(controlPlaneStatus).
-		SetTextColor(controlPlaneColor).
-		SetAlign(tview.AlignLeft).
-		SetExpansion(1))
+	table.SetCell(poolRow, 0, tview.NewTableCell("  control-plane").SetTextColor(ColorForeground))
+	table.SetCell(poolRow, 1, tview.NewTableCell("Control Plane").SetTextColor(ColorPrimary))
+	table.SetCell(poolRow, 2, tview.NewTableCell(fmt.Sprintf("%d/%d", controlPlaneCount, expectedControlPlaneCount)).SetAlign(tview.AlignCenter))
+	table.SetCell(poolRow, 3, tview.NewTableCell(instanceType).SetAlign(tview.AlignCenter))
+	table.SetCell(poolRow, 4, tview.NewTableCell(fmt.Sprintf("%d", controlPlaneCount*2)).SetAlign(tview.AlignCenter))
+	table.SetCell(poolRow, 5, tview.NewTableCell(fmt.Sprintf("%d GB", controlPlaneCount*4)).SetAlign(tview.AlignCenter))
+	table.SetCell(poolRow, 6, tview.NewTableCell(controlPlaneStatus).SetTextColor(controlPlaneColor))
 	poolRow++
 	
-	// Add worker pool if there are worker nodes
+	// Worker pool if exists
 	if len(cluster.WorkerNodes) > 0 {
 		workerCount := len(cluster.WorkerNodes)
 		workerStatus := "Running"
 		workerColor := ColorSuccess
 		
-		// Check worker status
 		for _, node := range cluster.WorkerNodes {
 			if node.Status != "running" {
 				workerStatus = "Scaling"
@@ -589,204 +562,110 @@ func showClusterDetails(cluster models.K3sCluster) {
 			}
 		}
 		
-		// Get worker instance type
-		workerInstanceType := cluster.InstanceType
-		if workerInstanceType == "" {
-			workerInstanceType = "t3.medium"
+		table.SetCell(poolRow, 0, tview.NewTableCell("  worker-pool-1").SetTextColor(ColorForeground))
+		table.SetCell(poolRow, 1, tview.NewTableCell("Worker").SetTextColor(ColorAccent))
+		table.SetCell(poolRow, 2, tview.NewTableCell(fmt.Sprintf("%d", workerCount)).SetAlign(tview.AlignCenter))
+		table.SetCell(poolRow, 3, tview.NewTableCell(instanceType).SetAlign(tview.AlignCenter))
+		table.SetCell(poolRow, 4, tview.NewTableCell(fmt.Sprintf("%d", workerCount*2)).SetAlign(tview.AlignCenter))
+		table.SetCell(poolRow, 5, tview.NewTableCell(fmt.Sprintf("%d GB", workerCount*4)).SetAlign(tview.AlignCenter))
+		table.SetCell(poolRow, 6, tview.NewTableCell(workerStatus).SetTextColor(workerColor))
+	}
+}
+
+func handleDetailsInput(event *tcell.EventKey) *tcell.EventKey {
+	switch event.Key() {
+	case tcell.KeyEscape:
+		// Stop metrics refresh
+		if detailsState != nil {
+			detailsState.StopRefresh()
 		}
-		if cluster.WorkerNodes[0].InstanceType != "" {
-			workerInstanceType = cluster.WorkerNodes[0].InstanceType
+		// Go back to clusters
+		pages.SwitchToPage("clusters")
+		go refreshClustersAsync()
+		return nil
+	case tcell.KeyRune:
+		switch event.Rune() {
+		case 'r', 'R':
+			// Refresh cluster data
+			if detailsState != nil {
+				cluster := detailsState.GetCluster()
+				manager := clusterPkg.NewManager()
+				clusters := manager.GetClusters()
+				for _, c := range clusters {
+					if c.Name == cluster.Name {
+						detailsState.UpdateCluster(c)
+						updateDetailsUI(c)
+						// Also refresh metrics immediately
+						go fetchMetricsOnce()
+						break
+					}
+				}
+			}
+			return nil
+		case 'e', 'E':
+			if detailsState != nil {
+				editCluster(detailsState.GetCluster())
+			}
+			return nil
+		case 'd', 'D':
+			if detailsState != nil {
+				deleteCluster(detailsState.GetCluster())
+			}
+			return nil
+		case 'k', 'K':
+			if detailsState != nil {
+				switchToCluster(detailsState.GetCluster().Name)
+			}
+			return nil
 		}
+	}
+	return event
+}
+
+// startMetricsRefresh starts the background goroutine to refresh metrics
+func startMetricsRefresh() {
+	go func() {
+		// Initial fetch
+		fetchMetricsOnce()
 		
-		// Calculate worker resources
-		workerCPU := workerCount * 2
-		workerMemory := workerCount * 4
-		if cluster.WorkerNodes[0].CPU > 0 {
-			workerCPU = workerCount * cluster.WorkerNodes[0].CPU
-		}
-		if cluster.WorkerNodes[0].MemoryGB > 0 {
-			workerMemory = workerCount * cluster.WorkerNodes[0].MemoryGB
-		}
+		// Set up refresh timer
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 		
-		nodePoolsTable.SetCell(poolRow, 0, tview.NewTableCell("  worker-pool-1").
-			SetTextColor(ColorForeground).
-			SetAlign(tview.AlignLeft).
-			SetExpansion(1))
-		nodePoolsTable.SetCell(poolRow, 1, tview.NewTableCell("Worker").
-			SetTextColor(ColorAccent).
-			SetAlign(tview.AlignLeft).
-			SetExpansion(1))
-		nodePoolsTable.SetCell(poolRow, 2, tview.NewTableCell(fmt.Sprintf("%d", workerCount)).
-			SetTextColor(ColorForeground).
-			SetAlign(tview.AlignCenter).
-			SetExpansion(1))
-		nodePoolsTable.SetCell(poolRow, 3, tview.NewTableCell(workerInstanceType).
-			SetTextColor(ColorForeground).
-			SetAlign(tview.AlignCenter).
-			SetExpansion(1))
-		nodePoolsTable.SetCell(poolRow, 4, tview.NewTableCell(fmt.Sprintf("%d", workerCPU)).
-			SetTextColor(ColorForeground).
-			SetAlign(tview.AlignCenter).
-			SetExpansion(1))
-		nodePoolsTable.SetCell(poolRow, 5, tview.NewTableCell(fmt.Sprintf("%d GB", workerMemory)).
-			SetTextColor(ColorForeground).
-			SetAlign(tview.AlignCenter).
-			SetExpansion(1))
-		nodePoolsTable.SetCell(poolRow, 6, tview.NewTableCell(workerStatus).
-			SetTextColor(workerColor).
-			SetAlign(tview.AlignLeft).
-			SetExpansion(1))
-		poolRow++
+		for {
+			select {
+			case <-ticker.C:
+				fetchMetricsOnce()
+			case <-detailsState.stopRefresh:
+				return
+			}
+		}
+	}()
+}
+
+// fetchMetricsOnce fetches metrics once and updates the UI
+func fetchMetricsOnce() {
+	if detailsState == nil {
+		return
 	}
 	
-	// Footer divider
-	footerDivider := tview.NewTextView().
-		SetText(string(CharDivider)).
-		SetTextColor(ColorMuted).
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := x; i < x+width; i++ {
-				screen.SetContent(i, y, CharDivider, nil, StyleMuted)
-			}
-			return 0, 0, 0, 0
-		})
+	cluster := detailsState.GetCluster()
+	if cluster.Status != models.StatusRunning {
+		return
+	}
 	
-	// Status bar with shortcuts (same style as listing page)
-	statusBarFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
-	
-	// Connection status (left)
-	connectionStatus := tview.NewTextView().
-		SetText(fmt.Sprintf(" %s● Connected to %s%s", TagSuccess, cluster.Name, TagReset)).
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignLeft)
-	
-	// Shortcuts (right)
-	shortcuts := fmt.Sprintf("%s%c%s Back  %sEnter%s Select  %sk%s Select  %se%s Edit  %sd%s Delete  %sr%s Refresh ", 
-		TagPrimary, CharArrowLeft, TagReset, 
-		TagPrimary, TagReset, 
-		TagPrimary, TagReset, 
-		TagPrimary, TagReset, 
-		TagPrimary, TagReset,
-		TagPrimary, TagReset)
-	statusRight := tview.NewTextView().
-		SetText(shortcuts).
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignRight)
-	
-	statusBarFlex.
-		AddItem(connectionStatus, 0, 1, false).
-		AddItem(statusRight, 0, 2, false)
-	
-	// Create content area with better organization
-	contentFlex := tview.NewFlex().SetDirection(tview.FlexRow)
-	
-	// Add sections container with dynamic height
-	contentFlex.AddItem(sectionsContainer, 12, 0, false)
-	
-	// Add a divider
-	contentDivider := tview.NewTextView().
-		SetText("").
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := x; i < x+width; i++ {
-				screen.SetContent(i, y, CharDivider, nil, StyleMuted)
-			}
-			return 0, 0, 0, 0
-		})
-	contentFlex.AddItem(contentDivider, 1, 0, false)
-	
-	// Add node pools title with statistics
-	poolsTitleFlex := tview.NewFlex().SetDirection(tview.FlexColumn)
-	
-	poolsTitle := tview.NewTextView().
-		SetDynamicColors(true).
-		SetText(fmt.Sprintf("  %sNode Pools%s", TagPrimary, TagReset))
-	
-	// Node statistics on the right
-	nodeStats := fmt.Sprintf("Nodes: [::b]%d[::-] | Min: [::d]%d[::-] | Max: [::d]%d[::-] | Running: [green]%d[::-] | Stopped: [red]%d[::-] | Provisioning: [yellow]%d[::-] ",
-		totalNodes, minNodes, maxNodes, runningCount, stoppedCount, provisioningCount)
-	
-	poolsStats := tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignRight).
-		SetText(nodeStats)
-	
-	poolsTitleFlex.
-		AddItem(poolsTitle, 0, 1, false).
-		AddItem(poolsStats, 0, 1, false)
+	// Fetch metrics in background
+	go func() {
+		metrics, err := clusterPkg.FetchClusterMetrics(cluster.Name)
 		
-	contentFlex.AddItem(poolsTitleFlex, 1, 0, false)
-	
-	// Add divider below title
-	poolsDivider := tview.NewTextView().
-		SetText("").
-		SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-			for i := x; i < x+width; i++ {
-				screen.SetContent(i, y, CharDivider, nil, StyleMuted)
-			}
-			return 0, 0, 0, 0
-		})
-	contentFlex.AddItem(poolsDivider, 1, 0, false)
-	contentFlex.AddItem(nodePoolsTable, 0, 1, true)
-	
-	// Build main layout (same structure as listing page)
-	flex.
-		AddItem(headerFlex, 1, 0, false).
-		AddItem(headerDivider, 1, 0, false).
-		AddItem(contentFlex, 0, 1, true).
-		AddItem(footerDivider, 1, 0, false).
-		AddItem(statusBarFlex, 1, 0, false)
-	
-	// Metrics refresh functionality has been removed
-	
-	// Handle keyboard input
-	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEscape:
-			// Stop the refresh goroutine
-			select {
-			case stopRefresh <- true:
-			default:
-			}
-			pages.SwitchToPage("clusters")
-			go refreshClustersAsync()
-			return nil
-		case tcell.KeyRune:
-			switch event.Rune() {
-			case 'e', 'E':
-				editCluster(cluster)
-				return nil
-			case 'd', 'D':
-				deleteCluster(cluster)
-				return nil
-			case 'r', 'R':
-				// Refresh - go back to cluster list and re-enter
-				pages.SwitchToPage("clusters")
-				go func() {
-					time.Sleep(100 * time.Millisecond)
-					// Get fresh cluster data
-					manager := clusterPkg.NewManager()
-					clusters := manager.GetClusters()
-					for _, c := range clusters {
-						if c.Name == cluster.Name {
-							app.QueueUpdateDraw(func() {
-								showClusterDetails(c)
-							})
-							break
-						}
-					}
-				}()
-				return nil
-			case 'k', 'K':
-				// Switch to this cluster (handles tunnel management)
-				switchToCluster(cluster.Name)
-				return nil
-			}
+		if err == nil {
+			// Update metrics
+			detailsState.UpdateMetrics(metrics)
+			
+			// Update UI only if we got new metrics
+			app.QueueUpdateDraw(func() {
+				updateMetricsTableData(cluster)
+			})
 		}
-		return event
-	})
-	
-	// Clear and switch to details page
-	// Remove any existing details page
-	pages.RemovePage("details")
-	// Add and switch to the new page
-	pages.AddAndSwitchToPage("details", flex, true)
+	}()
 }

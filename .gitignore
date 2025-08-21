@@ -41,6 +41,7 @@ Thumbs.db
 *.tmp
 *.bak
 *.log
+logs/
 
 # Build artifacts
 dist/
