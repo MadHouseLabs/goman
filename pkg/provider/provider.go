@@ -23,6 +23,11 @@ type Provider interface {
 	Initialize(ctx context.Context) (*InitializeResult, error)
 	Cleanup(ctx context.Context) error
 	GetStatus(ctx context.Context) (*InfrastructureStatus, error)
+
+	// Provider abstraction methods
+	GetServiceName(serviceType ServiceType) string
+	GetProviderConfig() ProviderConfig
+	GetServiceConfiguration(serviceType ServiceType) ServiceConfiguration
 }
 
 // LockService provides distributed locking for resources
@@ -33,6 +38,10 @@ type LockService interface {
 	// AcquireLock tries to acquire a lock for a resource
 	// Returns a lock token if successful, error if lock is held by another process
 	AcquireLock(ctx context.Context, resourceID string, owner string, ttl time.Duration) (string, error)
+
+	// AcquireLockWithMetadata tries to acquire a lock with additional metadata
+	// Returns a lock token if successful, error if lock is held by another process
+	AcquireLockWithMetadata(ctx context.Context, resourceID string, owner string, ttl time.Duration, metadata *LockMetadata) (string, error)
 
 	// ReleaseLock releases a lock using the token
 	ReleaseLock(ctx context.Context, resourceID string, token string) error
@@ -83,6 +92,12 @@ type ComputeService interface {
 
 	// RunCommand executes a command on instances using cloud-native methods (e.g., SSM for AWS)
 	RunCommand(ctx context.Context, instanceIDs []string, command string) (*CommandResult, error)
+	
+	// StartCommand starts a command on instances without waiting for completion (non-blocking)
+	StartCommand(ctx context.Context, instanceIDs []string, command string) (string, error)
+	
+	// GetCommandResult checks the status of a previously started command
+	GetCommandResult(ctx context.Context, commandID string) (*CommandResult, error)
 }
 
 // CommandResult represents the result of running a command on instances
@@ -127,12 +142,21 @@ type Instance struct {
 	Tags         map[string]string
 }
 
+// LockMetadata contains additional information about what is holding the lock
+type LockMetadata struct {
+	Phase     string `json:"phase"`     // Current reconciliation phase
+	Step      string `json:"step"`      // Current step within the phase
+	RequestID string `json:"requestId"` // Lambda request ID or process identifier
+	StartedAt time.Time `json:"startedAt"` // When this reconciliation started
+}
+
 // Lock represents a distributed lock
 type Lock struct {
 	ResourceID string
 	Owner      string
 	Token      string
 	ExpiresAt  time.Time
+	Metadata   *LockMetadata `json:"metadata,omitempty"`
 }
 
 // InitializeResult represents the result of infrastructure initialization

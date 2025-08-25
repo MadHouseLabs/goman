@@ -14,6 +14,8 @@ const (
 	StatusDeleting ClusterStatus = "deleting"
 	StatusUpdating ClusterStatus = "updating"
 	StatusError    ClusterStatus = "error"
+	StatusStarting ClusterStatus = "starting"
+	StatusStopping ClusterStatus = "stopping"
 )
 
 // NodeRole represents the role of a node in the cluster
@@ -76,6 +78,8 @@ type K3sCluster struct {
 	ServiceCIDR    string        `json:"service_cidr"`
 	ClusterDNS     string        `json:"cluster_dns"`
 	Features       K3sFeatures   `json:"features"`
+	DesiredState   string        `json:"desired_state"` // "running" or "stopped"
+	NodePools      []NodePool    `json:"node_pools,omitempty"` // Worker node pools
 }
 
 // GetMasterCount returns the number of master nodes based on the cluster mode

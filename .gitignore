@@ -54,3 +54,7 @@ release/
 # Local test files
 test-cluster.yaml
 local-test/
+# Debug binaries
+__debug_bin*
+debug_binary*
+**/test-lambda

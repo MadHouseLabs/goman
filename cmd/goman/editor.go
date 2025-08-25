@@ -25,20 +25,98 @@ func editCluster(cluster models.K3sCluster) {
 	app.Suspend(func() {
 		// Clear and reset terminal for a clean editor experience
 		fmt.Print("\033[2J\033[H\033[?47l")
+		// Build nodepools YAML section
+		var nodePoolsYAML string
+		if len(cluster.NodePools) > 0 {
+			nodePoolsYAML = "nodePools:\n"
+			for _, np := range cluster.NodePools {
+				nodePoolsYAML += fmt.Sprintf("  - name: %s\n", np.Name)
+				nodePoolsYAML += fmt.Sprintf("    count: %d\n", np.Count)
+				nodePoolsYAML += fmt.Sprintf("    instanceType: %s\n", np.InstanceType)
+				
+				if len(np.Labels) > 0 {
+					nodePoolsYAML += "    labels:\n"
+					for k, v := range np.Labels {
+						nodePoolsYAML += fmt.Sprintf("      %s: %s\n", k, v)
+					}
+				}
+				
+				if len(np.Taints) > 0 {
+					nodePoolsYAML += "    taints:\n"
+					for _, t := range np.Taints {
+						nodePoolsYAML += fmt.Sprintf("      - key: %s\n", t.Key)
+						nodePoolsYAML += fmt.Sprintf("        value: \"%s\"\n", t.Value)
+						nodePoolsYAML += fmt.Sprintf("        effect: %s\n", t.Effect)
+					}
+				}
+			}
+			// Add examples as comments even when nodepools exist
+			nodePoolsYAML += `
+# Additional example configurations:
+#   - name: compute-intensive
+#     count: 1
+#     instanceType: t3.xlarge
+#     labels:
+#       workload: compute
+#       tier: processing
+#   - name: gpu-workers
+#     count: 1
+#     instanceType: g4dn.xlarge
+#     labels:
+#       node.kubernetes.io/instance-type: g4dn.xlarge
+#       workload: gpu
+#     taints:
+#       - key: nvidia.com/gpu
+#         value: "true"
+#         effect: NoSchedule`
+		} else {
+			nodePoolsYAML = `nodePools: []
+# Example configurations (remove the # to activate):
+#   - name: general
+#     count: 2
+#     instanceType: t3.medium
+#     labels:
+#       workload: general
+#       tier: application
+#   - name: compute-intensive
+#     count: 1
+#     instanceType: t3.xlarge
+#     labels:
+#       workload: compute
+#       tier: processing
+#   - name: gpu-workers
+#     count: 1
+#     instanceType: g4dn.xlarge
+#     labels:
+#       node.kubernetes.io/instance-type: g4dn.xlarge
+#       workload: gpu
+#     taints:
+#       - key: nvidia.com/gpu
+#         value: "true"
+#         effect: NoSchedule`
+		}
+		
 		// Convert cluster to YAML format for editing - only show editable fields
 		yamlContent := fmt.Sprintf(`# Editing: %s
 # Mode: %s | Status: %s | Created: %s
 # 
 # Read-only: name, mode, k3s version, network settings
-# Editable: description, region, instanceType
+# Editable: description, region, instanceType, nodePools
 
 description: "%s"
 region: %s
 instanceType: %s
+
+# Node Pools - Worker node groups (optional)
+# Uncomment and modify the examples below to add worker nodes
+# Each pool creates a group of worker nodes with specified configuration
+
+%s
 `, cluster.Name, cluster.Mode, cluster.Status, cluster.CreatedAt.Format("2006-01-02"),
 			cluster.Description, 
 			cluster.Region,
-			cluster.InstanceType)
+			cluster.InstanceType,
+			nodePoolsYAML)
 
 		// Create temporary file for editing
 		tmpFile, err := ioutil.TempFile("", fmt.Sprintf("goman-cluster-%s-*.yaml", cluster.Name))
@@ -184,6 +262,25 @@ mode: dev                # dev (1 master) or ha (3 masters)
 region: ap-south-1
 instanceType: t3.medium
 k3sVersion: latest
+
+# Node Pools (optional) - Add worker node groups
+# Uncomment and modify to add worker nodes
+# nodePools:
+#   - name: general
+#     count: 2
+#     instanceType: t3.medium
+#     labels:
+#       workload: general
+#   - name: gpu-workers
+#     count: 1
+#     instanceType: g4dn.xlarge
+#     labels:
+#       node.kubernetes.io/instance-type: g4dn.xlarge
+#       workload: gpu
+#     taints:
+#       - key: nvidia.com/gpu
+#         value: "true"
+#         effect: NoSchedule
 `, uniqueName)
 
 		// Create temporary file for editing
@@ -382,8 +479,70 @@ func validateAndUpdateClusterFromEditor(originalCluster models.K3sCluster, yamlC
 		description = originalCluster.Description
 	}
 	
-	// Update the cluster (description, region, and instanceType can change)
-	return updateExistingCluster(originalCluster.Name, name, description, mode, region, instanceType)
+	// Extract nodePools
+	var nodePools []models.NodePool
+	if nodePoolsRaw, ok := config["nodePools"]; ok {
+		if npList, ok := nodePoolsRaw.([]interface{}); ok {
+			for _, np := range npList {
+				if npMap, ok := np.(map[interface{}]interface{}); ok {
+					nodePool := models.NodePool{}
+					
+					if name, ok := npMap["name"].(string); ok {
+						nodePool.Name = name
+					}
+					// YAML unmarshals integers as int or float64 depending on context
+					if count, ok := npMap["count"].(int); ok {
+						nodePool.Count = count
+					} else if countFloat, ok := npMap["count"].(float64); ok {
+						nodePool.Count = int(countFloat)
+					}
+					if instanceType, ok := npMap["instanceType"].(string); ok {
+						nodePool.InstanceType = instanceType
+					}
+					
+					// Parse labels
+					if labelsRaw, ok := npMap["labels"]; ok {
+						if labelsMap, ok := labelsRaw.(map[interface{}]interface{}); ok {
+							nodePool.Labels = make(map[string]string)
+							for k, v := range labelsMap {
+								if ks, ok := k.(string); ok {
+									if vs, ok := v.(string); ok {
+										nodePool.Labels[ks] = vs
+									}
+								}
+							}
+						}
+					}
+					
+					// Parse taints
+					if taintsRaw, ok := npMap["taints"]; ok {
+						if taintsList, ok := taintsRaw.([]interface{}); ok {
+							for _, t := range taintsList {
+								if taintMap, ok := t.(map[interface{}]interface{}); ok {
+									taint := models.Taint{}
+									if key, ok := taintMap["key"].(string); ok {
+										taint.Key = key
+									}
+									if value, ok := taintMap["value"].(string); ok {
+										taint.Value = value
+									}
+									if effect, ok := taintMap["effect"].(string); ok {
+										taint.Effect = effect
+									}
+									nodePool.Taints = append(nodePool.Taints, taint)
+								}
+							}
+						}
+					}
+					
+					nodePools = append(nodePools, nodePool)
+				}
+			}
+		}
+	}
+	
+	// Update the cluster (description, region, instanceType, and nodePools can change)
+	return updateExistingClusterWithNodePools(originalCluster.Name, name, description, mode, region, instanceType, nodePools)
 }
 
 // createNewClusterFromEditor creates a cluster from editor without UI
@@ -412,6 +571,37 @@ func updateExistingCluster(originalName, name, description, mode, region, instan
 	existingCluster.Description = description
 	existingCluster.Region = region
 	existingCluster.InstanceType = instanceType
+	
+	// Mode should NOT be updated - it's immutable
+	// Keep the existing mode
+	
+	// Update the cluster
+	_, err := clusterManager.UpdateCluster(*existingCluster)
+	return err
+}
+
+// updateExistingClusterWithNodePools updates an existing cluster configuration including nodepools
+func updateExistingClusterWithNodePools(originalName, name, description, mode, region, instanceType string, nodePools []models.NodePool) error {
+	// Load the existing cluster
+	existingClusters := clusterManager.GetClusters()
+	var existingCluster *models.K3sCluster
+	for i := range existingClusters {
+		if existingClusters[i].Name == originalName {
+			existingCluster = &existingClusters[i]
+			break
+		}
+	}
+	
+	if existingCluster == nil {
+		return fmt.Errorf("cluster not found")
+	}
+	
+	// Update cluster fields
+	existingCluster.Name = name
+	existingCluster.Description = description
+	existingCluster.Region = region
+	existingCluster.InstanceType = instanceType
+	existingCluster.NodePools = nodePools
 	
 	// Mode should NOT be updated - it's immutable
 	// Keep the existing mode

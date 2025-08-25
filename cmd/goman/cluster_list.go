@@ -137,6 +137,21 @@ perfect for edge, IoT, CI, and development[::-]`)
 				}
 			case 'r', 'R':
 				go refreshClustersAsync()
+			case 't', 'T':
+				row, _ := clusterTable.GetSelection()
+				if row > 0 && row <= len(clusters) {
+					triggerReconciliation(clusters[row-1])
+				}
+			case 's', 'S':
+				row, _ := clusterTable.GetSelection()
+				if row > 0 && row <= len(clusters) {
+					stopCluster(clusters[row-1])
+				}
+			case 'a', 'A':
+				row, _ := clusterTable.GetSelection()
+				if row > 0 && row <= len(clusters) {
+					startCluster(clusters[row-1])
+				}
 			case 'q', 'Q':
 				app.Stop()
 			}
@@ -183,7 +198,7 @@ perfect for edge, IoT, CI, and development[::-]`)
 		SetTextAlign(tview.AlignLeft)
 	
 	// Shortcuts (right)
-	shortcuts := fmt.Sprintf("[#8be9fd]%c%c[::-] Navigate  [#8be9fd]Enter[::-] Details  [#8be9fd]k[::-] Select  [#8be9fd]c[::-] Create  [#8be9fd]e[::-] Edit  [#8be9fd]d[::-] Delete  [#8be9fd]r[::-] Refresh  [#8be9fd]q[::-] Quit ", CharArrowUp, CharArrowDown)
+	shortcuts := fmt.Sprintf("[#8be9fd]%c%c[::-] Navigate  [#8be9fd]Enter[::-] Details  [#8be9fd]k[::-] Select  [#8be9fd]c[::-] Create  [#8be9fd]t[::-] Reconcile  [#8be9fd]s[::-] Stop  [#8be9fd]a[::-] Start  [#8be9fd]r[::-] Refresh  [#8be9fd]q[::-] Quit ", CharArrowUp, CharArrowDown)
 	statusRight := tview.NewTextView().
 		SetText(shortcuts).
 		SetDynamicColors(true).
@@ -285,7 +300,11 @@ func refreshClusters() {
 		statusColor := ColorDanger
 		if cluster.Status == "running" {
 			statusColor = ColorSuccess
+		} else if cluster.Status == "stopped" {
+			statusColor = ColorMuted
 		} else if cluster.Status == "pending" || cluster.Status == "creating" {
+			statusColor = ColorWarning
+		} else if cluster.Status == "starting" || cluster.Status == "stopping" {
 			statusColor = ColorWarning
 		} else if cluster.Status == "deleting" {
 			statusColor = ColorDanger

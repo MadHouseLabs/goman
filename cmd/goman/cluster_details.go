@@ -24,6 +24,17 @@ func showClusterDetails(cluster models.K3sCluster) {
 		detailsState.StopRefresh()
 	}
 	
+	// If CreatedAt is zero, try to get fresh data from manager
+	if cluster.CreatedAt.IsZero() && clusterManager != nil {
+		clusters := clusterManager.GetClusters()
+		for _, c := range clusters {
+			if c.Name == cluster.Name {
+				cluster = c
+				break
+			}
+		}
+	}
+	
 	// Create or update the UI
 	if !detailsInitialized {
 		// Create new state only when creating UI for the first time
@@ -288,8 +299,9 @@ func createStatusBar() *tview.Flex {
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignLeft)
 	
-	shortcuts := fmt.Sprintf("%s%c%s Back  %sEnter%s Select  %sk%s Select  %se%s Edit  %sd%s Delete  %sr%s Refresh ",
+	shortcuts := fmt.Sprintf("%s%c%s Back  %sEnter%s Select  %sk%s Select  %se%s Edit  %ss%s Stop  %sa%s Start  %sr%s Refresh ",
 		TagPrimary, CharArrowLeft, TagReset,
+		TagPrimary, TagReset,
 		TagPrimary, TagReset,
 		TagPrimary, TagReset,
 		TagPrimary, TagReset,
@@ -322,6 +334,9 @@ func updateDetailsUI(cluster models.K3sCluster) {
 		} else if cluster.Status == "stopped" {
 			statusColor = TagMuted
 			statusIcon = "○"
+		} else if cluster.Status == "starting" || cluster.Status == "stopping" {
+			statusColor = TagWarning
+			statusIcon = "◐"
 		}
 		
 		statusText := fmt.Sprintf("%s%s %s %s%s %s", TagBold, cluster.Name, TagReset, statusColor, statusIcon, strings.ToUpper(string(cluster.Status)))
@@ -420,8 +435,11 @@ func updateMetricsTableData(cluster models.K3sCluster) {
 		return
 	}
 	
-	// Uptime
-	uptime := time.Since(cluster.CreatedAt)
+	// Always use the latest cluster data from state for accurate timestamps
+	latestCluster := detailsState.GetCluster()
+	
+	// Uptime - use the latest cluster data which has the correct CreatedAt
+	uptime := time.Since(latestCluster.CreatedAt)
 	uptimeStr := fmt.Sprintf("%d days, %d hours", int(uptime.Hours()/24), int(uptime.Hours())%24)
 	table.SetCell(1, 1, tview.NewTableCell(uptimeStr))
 	
@@ -435,14 +453,14 @@ func updateMetricsTableData(cluster models.K3sCluster) {
 		}
 		table.SetCell(2, 1, tview.NewTableCell(healthStr).SetTextColor(healthColor))
 	} else {
-		totalNodes := len(cluster.MasterNodes) + len(cluster.WorkerNodes)
+		totalNodes := len(latestCluster.MasterNodes) + len(latestCluster.WorkerNodes)
 		runningNodes := 0
-		for _, node := range cluster.MasterNodes {
+		for _, node := range latestCluster.MasterNodes {
 			if node.Status == "running" {
 				runningNodes++
 			}
 		}
-		for _, node := range cluster.WorkerNodes {
+		for _, node := range latestCluster.WorkerNodes {
 			if node.Status == "running" {
 				runningNodes++
 			}
@@ -616,6 +634,16 @@ func handleDetailsInput(event *tcell.EventKey) *tcell.EventKey {
 		case 'k', 'K':
 			if detailsState != nil {
 				switchToCluster(detailsState.GetCluster().Name)
+			}
+			return nil
+		case 's', 'S':
+			if detailsState != nil {
+				stopCluster(detailsState.GetCluster())
+			}
+			return nil
+		case 'a', 'A':
+			if detailsState != nil {
+				startCluster(detailsState.GetCluster())
 			}
 			return nil
 		}

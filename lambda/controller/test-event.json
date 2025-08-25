@@ -1,0 +1,19 @@
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "aws:s3",
+      "awsRegion": "ap-south-1",
+      "eventTime": "2025-08-25T03:00:00.000Z",
+      "eventName": "ObjectCreated:Put",
+      "s3": {
+        "bucket": {
+          "name": "goman-664254906042"
+        },
+        "object": {
+          "key": "clusters/k3s-cluster-1756046400/config.yaml"
+        }
+      }
+    }
+  ]
+}

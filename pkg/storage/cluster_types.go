@@ -43,6 +43,24 @@ type ClusterSpec struct {
 	SSHKeyPath     string             `json:"ssh_key_path" yaml:"sshKeyPath"`
 	KubeConfigPath string             `json:"kubeconfig_path" yaml:"kubeConfigPath"`
 	Tags           []string           `json:"tags,omitempty" yaml:"tags,omitempty"`
+	DesiredState   string             `json:"desired_state,omitempty" yaml:"desiredState,omitempty"` // "running" or "stopped"
+	NodePools      []NodePool         `json:"nodePools,omitempty" yaml:"nodePools,omitempty"`        // Worker node pools
+}
+
+// NodePool defines a group of worker nodes with similar configuration
+type NodePool struct {
+	Name         string            `json:"name" yaml:"name"`
+	Count        int               `json:"count" yaml:"count"`
+	InstanceType string            `json:"instanceType" yaml:"instanceType"`
+	Labels       map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Taints       []Taint           `json:"taints,omitempty" yaml:"taints,omitempty"`
+}
+
+// Taint represents a Kubernetes taint on nodes
+type Taint struct {
+	Key    string `json:"key" yaml:"key"`
+	Value  string `json:"value" yaml:"value"`
+	Effect string `json:"effect" yaml:"effect"` // NoSchedule, PreferNoSchedule, NoExecute
 }
 
 // ClusterStatus represents the observed state stored in status.yaml
@@ -81,6 +99,83 @@ type ClusterCondition struct {
 	Message            string    `json:"message,omitempty"`
 }
 
+// determineDesiredState maps cluster status to desired state
+func determineDesiredState(cluster models.K3sCluster) string {
+	// If DesiredState is explicitly set, use it
+	if cluster.DesiredState != "" {
+		return cluster.DesiredState
+	}
+	// Otherwise, infer from status
+	switch cluster.Status {
+	case models.StatusStopped, models.StatusStopping:
+		return "stopped"
+	default:
+		return "running"
+	}
+}
+
+// convertNodePoolsToStorage converts models.NodePool to storage.NodePool
+func convertNodePoolsToStorage(nodePools []models.NodePool) []NodePool {
+	if len(nodePools) == 0 {
+		return nil
+	}
+	
+	result := make([]NodePool, len(nodePools))
+	for i, np := range nodePools {
+		result[i] = NodePool{
+			Name:         np.Name,
+			Count:        np.Count,
+			InstanceType: np.InstanceType,
+			Labels:       np.Labels,
+		}
+		
+		// Convert taints
+		if len(np.Taints) > 0 {
+			result[i].Taints = make([]Taint, len(np.Taints))
+			for j, t := range np.Taints {
+				result[i].Taints[j] = Taint{
+					Key:    t.Key,
+					Value:  t.Value,
+					Effect: t.Effect,
+				}
+			}
+		}
+	}
+	
+	return result
+}
+
+// convertNodePoolsFromStorage converts storage.NodePool to models.NodePool
+func convertNodePoolsFromStorage(nodePools []NodePool) []models.NodePool {
+	if len(nodePools) == 0 {
+		return nil
+	}
+	
+	result := make([]models.NodePool, len(nodePools))
+	for i, np := range nodePools {
+		result[i] = models.NodePool{
+			Name:         np.Name,
+			Count:        np.Count,
+			InstanceType: np.InstanceType,
+			Labels:       np.Labels,
+		}
+		
+		// Convert taints
+		if len(np.Taints) > 0 {
+			result[i].Taints = make([]models.Taint, len(np.Taints))
+			for j, t := range np.Taints {
+				result[i].Taints[j] = models.Taint{
+					Key:    t.Key,
+					Value:  t.Value,
+					Effect: t.Effect,
+				}
+			}
+		}
+	}
+	
+	return result
+}
+
 // ConvertToClusterConfig converts K3sCluster to ClusterConfig (for config.json)
 func ConvertToClusterConfig(cluster models.K3sCluster) *ClusterConfig {
 	return &ClusterConfig{
@@ -112,6 +207,8 @@ func ConvertToClusterConfig(cluster models.K3sCluster) *ClusterConfig {
 			SSHKeyPath:     cluster.SSHKeyPath,
 			KubeConfigPath: cluster.KubeConfigPath,
 			Tags:           cluster.Tags,
+			DesiredState:   determineDesiredState(cluster),
+			NodePools:      convertNodePoolsToStorage(cluster.NodePools),
 		},
 	}
 }
@@ -138,6 +235,7 @@ func ConvertFromClusterConfig(config *ClusterConfig, status *ClusterStatus) mode
 		Tags:           config.Spec.Tags,
 		CreatedAt:      config.Metadata.CreatedAt,
 		UpdatedAt:      config.Metadata.UpdatedAt,
+		NodePools:      convertNodePoolsFromStorage(config.Spec.NodePools),
 	}
 
 	// Check if cluster is marked for deletion

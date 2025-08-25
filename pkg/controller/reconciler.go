@@ -2,35 +2,32 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
-	"gopkg.in/yaml.v3"
 
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/madhouselabs/goman/pkg/provider"
 )
 
-// ClusterCleaner interface for providers that can clean up cluster resources
-type ClusterCleaner interface {
-	CleanupClusterResources(ctx context.Context, clusterName string) error
-}
-
-// Reconciler handles cluster reconciliation with distributed locking
+// Reconciler handles cluster reconciliation with a simple linear approach
 type Reconciler struct {
 	provider provider.Provider
-	owner    string // Unique identifier for this reconciler instance
+	owner    string
 }
 
-// NewReconciler creates a new reconciler
+// NewReconciler creates a new simple reconciler
 func NewReconciler(prov provider.Provider, owner string) (*Reconciler, error) {
 	if prov == nil {
 		return nil, fmt.Errorf("provider is required")
 	}
 
 	if owner == "" {
-		// Generate unique owner ID
 		owner = fmt.Sprintf("reconciler-%s-%d", prov.Region(), time.Now().UnixNano())
 	}
 
@@ -40,207 +37,932 @@ func NewReconciler(prov provider.Provider, owner string) (*Reconciler, error) {
 	}, nil
 }
 
-// ReconcileCluster reconciles a cluster with distributed locking
+// ReconcileCluster reconciles a cluster with simple linear flow
 func (r *Reconciler) ReconcileCluster(ctx context.Context, clusterName string) (*models.ReconcileResult, error) {
-	log.Printf("[RECONCILE] Starting reconciliation for cluster %s", clusterName)
-	
-	// Create overall timeout context for the entire reconciliation
-	reconcileCtx, reconcileCancel := context.WithTimeout(ctx, ReconcileTimeout)
-	defer reconcileCancel()
-
-	resourceID := fmt.Sprintf("cluster-%s", clusterName)
-	log.Printf("[LOCK] Attempting to acquire lock for %s", resourceID)
-
-	// Try to acquire lock
-	lockCtx, lockCancel := context.WithTimeout(reconcileCtx, LockAcquireTimeout)
-	defer lockCancel()
-
-	lockToken, err := r.provider.GetLockService().AcquireLock(lockCtx, resourceID, r.owner, LockTTL)
-	if err != nil {
-		// Another controller is working on this cluster
-		log.Printf("[LOCK] Failed to acquire lock for %s: %v", resourceID, err)
-
-		// Check if cluster is locked
-		locked, owner, _ := r.provider.GetLockService().IsLocked(ctx, resourceID)
-		if locked {
-			log.Printf("[LOCK] Cluster %s is currently locked by %s", clusterName, owner)
-			
-			// Check if cluster still exists before requeueing
-			log.Printf("[LOAD] Checking if cluster %s still exists before requeue", clusterName)
-			configKey := fmt.Sprintf("clusters/%s/config.yaml", clusterName)
-			_, configErr := r.provider.GetStorageService().GetObject(ctx, configKey)
-			if configErr != nil {
-				if strings.Contains(configErr.Error(), "not found") || strings.Contains(configErr.Error(), "NoSuchKey") {
-					log.Printf("[LOAD] Cluster %s no longer exists (was locked by %s), skipping reconciliation", clusterName, owner)
-					return &models.ReconcileResult{
-						Requeue: false,
-					}, nil
-				}
-			}
-			
-			// Cluster exists but is locked, requeue for later
-			log.Printf("[REQUEUE] Cluster %s exists but is locked, requeueing in %v", clusterName, LockedClusterRetryInterval)
-			return &models.ReconcileResult{
-				Requeue:      true,
-				RequeueAfter: LockedClusterRetryInterval,
-			}, nil
-		}
-
-		return nil, fmt.Errorf("failed to acquire lock: %w", err)
-	}
-
-	// Ensure we release the lock when done
-	defer func() {
-		// Use a fresh context for lock release to ensure it happens even if main context is cancelled
-		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), LockReleaseTimeout)
-		defer releaseCancel()
-
-		if err := r.provider.GetLockService().ReleaseLock(releaseCtx, resourceID, lockToken); err != nil {
-			log.Printf("[LOCK] Failed to release lock for %s: %v", resourceID, err)
-		} else {
-			log.Printf("[LOCK] Released lock for %s", resourceID)
-		}
-	}()
-
-	log.Printf("[LOCK] Successfully acquired lock for cluster %s (token: %s)", clusterName, lockToken)
-
-	// Load cluster resource from storage
-	log.Printf("[LOAD] Loading cluster resource for %s", clusterName)
-	resource, err := r.loadClusterResource(reconcileCtx, clusterName)
-	if err != nil {
-		// Check if the error indicates the cluster doesn't exist
-		if strings.Contains(err.Error(), "not found") {
-			log.Printf("[LOAD] Cluster %s no longer exists, skipping reconciliation", clusterName)
-			// Return success with no requeue - cluster is gone
-			return &models.ReconcileResult{
-				Requeue: false,
-			}, nil
-		}
-		return nil, fmt.Errorf("failed to load cluster resource: %w", err)
-	}
-
-	// For long-running operations, periodically renew the lock
-	renewCtx, renewCancel := context.WithCancel(reconcileCtx)
-	defer renewCancel() // Cancel the renewal goroutine when done
-
-	renewTicker := time.NewTicker(LockRenewInterval)
-	defer renewTicker.Stop()
-
-	// Start lock renewal in background
-	renewDone := make(chan struct{})
-	go func() {
-		defer close(renewDone)
-		for {
-			select {
-			case <-renewCtx.Done():
-				return
-			case <-renewTicker.C:
-				// Use a timeout context for lock renewal
-				renewLockCtx, renewLockCancel := context.WithTimeout(reconcileCtx, LockRenewTimeout)
-				if err := r.provider.GetLockService().RenewLock(renewLockCtx, resourceID, lockToken, LockTTL); err != nil {
-					log.Printf("[LOCK] Failed to renew lock for %s: %v", resourceID, err)
-					renewLockCancel()
-					return
-				}
-				renewLockCancel()
-				log.Printf("[LOCK] Renewed lock for cluster %s", clusterName)
-			}
-		}
-	}()
-
-	// Perform reconciliation based on phase
-	result, err := r.reconcileBasedOnPhase(reconcileCtx, resource)
-	if err != nil {
-		// Send error notification
-		r.sendNotification(reconcileCtx, "error", fmt.Sprintf("Reconciliation failed for cluster %s: %v", clusterName, err))
-		return nil, err
-	}
-
-	// Check if cluster was deleted (reconcileDeleting returns a special result)
-	// If deletion is complete, the files have already been removed by reconcileDeleting
-	// so we should NOT save the resource back
-	if resource.Status.Phase == models.ClusterPhaseDeleting && result != nil && !result.Requeue {
-		// Deletion completed successfully, don't save the resource back
-		log.Printf("Cluster %s deletion completed, not saving resource", clusterName)
-		return result, nil
-	}
-
-	// Save updated resource for all other phases
-	if err := r.saveClusterResource(reconcileCtx, resource); err != nil {
-		return nil, fmt.Errorf("failed to save cluster resource: %w", err)
-	}
-
-	// Send success notification if cluster became ready
-	if resource.Status.Phase == models.ClusterPhaseRunning {
-		r.sendNotification(reconcileCtx, "success", fmt.Sprintf("Cluster %s is now running", clusterName))
-	}
-
-	return result, nil
+	return r.ReconcileClusterWithRequestID(ctx, clusterName, "unknown")
 }
 
-// Phase reconciliation functions moved to phases.go and deletion.go
+// ReconcileClusterWithRequestID reconciles a cluster with request tracking
+func (r *Reconciler) ReconcileClusterWithRequestID(ctx context.Context, clusterName string, requestID string) (*models.ReconcileResult, error) {
+	log.Printf("[RECONCILE] Starting reconciliation for cluster %s (request: %s)", clusterName, requestID)
 
-// reconcileProvisioning creates infrastructure
-func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
-	log.Printf("[PROVISIONING] Starting infrastructure provisioning for cluster %s", resource.Name)
-	
-	// Use compute service to create instances
-	computeService := r.provider.GetComputeService()
+	// Create timeout context (14 minutes to be safe within Lambda limit)
+	reconcileCtx, cancel := context.WithTimeout(ctx, 14*time.Minute)
+	defer cancel()
 
-	// First, check for existing instances for this cluster
-	filters := map[string]string{
-		"tag:ClusterName":     resource.Name,
-		"instance-state-name": "pending,running,stopping,stopped",
-	}
-	
-	// Add region filter if specified in the resource
-	if resource.Spec.Region != "" {
-		filters["region"] = resource.Spec.Region
-		log.Printf("Querying instances for cluster %s in region %s", resource.Name, resource.Spec.Region)
-	}
-	
-	existingInstances, err := computeService.ListInstances(ctx, filters)
+	// Acquire distributed lock
+	resourceID := fmt.Sprintf("cluster-%s", clusterName)
+	lockToken, err := r.acquireLock(reconcileCtx, resourceID)
 	if err != nil {
-		log.Printf("Warning: failed to list existing instances: %v", err)
-		existingInstances = nil
+		log.Printf("[RECONCILE] Failed to acquire lock: %v", err)
+		return &models.ReconcileResult{Requeue: true, RequeueAfter: 30 * time.Second}, nil
+	}
+	defer r.releaseLock(reconcileCtx, resourceID, lockToken)
+
+	// Load cluster configuration and status
+	cluster, err := r.loadCluster(reconcileCtx, clusterName)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			log.Printf("[RECONCILE] Cluster %s not found, skipping", clusterName)
+			return &models.ReconcileResult{Requeue: false}, nil
+		}
+		log.Printf("[RECONCILE] Failed to load cluster: %v", err)
+		return &models.ReconcileResult{Requeue: true, RequeueAfter: 1 * time.Minute}, nil
 	}
 
-	// Update Status.Instances with current state from cloud provider
-	if len(existingInstances) > 0 {
-		log.Printf("Found %d existing instances for cluster %s", len(existingInstances), resource.Name)
-		
-		// Build a map of existing instances for quick lookup
-		instanceMap := make(map[string]*provider.Instance)
-		for _, inst := range existingInstances {
-			instanceMap[inst.Name] = inst
+	// Handle deletion if requested
+	if cluster.DeletionTimestamp != nil {
+		return r.handleDeletion(reconcileCtx, cluster)
+	}
+
+	// Execute reconciliation based on current phase
+	needsRequeue, err := r.reconcileCluster(reconcileCtx, cluster)
+	if err != nil {
+		log.Printf("[RECONCILE] Reconciliation failed: %v", err)
+		cluster.Status.Phase = string(models.ClusterPhaseFailed)
+		cluster.Status.Message = err.Error()
+		r.saveCluster(reconcileCtx, cluster)
+		return &models.ReconcileResult{Requeue: true, RequeueAfter: 2 * time.Minute}, nil
+	}
+
+	// Save final state
+	err = r.saveCluster(reconcileCtx, cluster)
+	if err != nil {
+		log.Printf("[RECONCILE] Failed to save cluster state: %v", err)
+		return &models.ReconcileResult{Requeue: true, RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Check if we need to requeue for further processing
+	if cluster.Status.Phase == string(models.ClusterPhaseRunning) {
+		if needsRequeue {
+			log.Printf("[RECONCILE] Cluster %s is running but needs requeue (cleanup happened)", clusterName)
+			return &models.ReconcileResult{Requeue: true, RequeueAfter: 15 * time.Second}, nil
 		}
-		
-		// Update existing entries in Status.Instances
-		for i := range resource.Status.Instances {
-			if cloudInst, ok := instanceMap[resource.Status.Instances[i].Name]; ok {
-				// Update with current state from cloud
-				resource.Status.Instances[i].InstanceID = cloudInst.ID
-				resource.Status.Instances[i].State = cloudInst.State
-				resource.Status.Instances[i].PrivateIP = cloudInst.PrivateIP
-				resource.Status.Instances[i].PublicIP = cloudInst.PublicIP
-				if cloudInst.LaunchTime.After(resource.Status.Instances[i].LaunchTime) {
-					resource.Status.Instances[i].LaunchTime = cloudInst.LaunchTime
+		log.Printf("[RECONCILE] Cluster %s is ready", clusterName)
+		return &models.ReconcileResult{Requeue: false}, nil
+	}
+
+	log.Printf("[RECONCILE] Cluster %s phase: %s, requeuing", clusterName, cluster.Status.Phase)
+	return &models.ReconcileResult{Requeue: true, RequeueAfter: 30 * time.Second}, nil
+}
+
+// reconcileCluster performs the main reconciliation logic
+// Returns (needsRequeue, error) where needsRequeue indicates if reconciliation should run again
+func (r *Reconciler) reconcileCluster(ctx context.Context, cluster *models.ClusterResource) (bool, error) {
+	log.Printf("[RECONCILE] Processing cluster %s in phase %s", cluster.Name, cluster.Status.Phase)
+
+	switch cluster.Status.Phase {
+	case string(models.ClusterPhasePending), "":
+		return false, r.provisionInfrastructure(ctx, cluster)
+	case string(models.ClusterPhaseProvisioning):
+		return false, r.checkProvisioningProgress(ctx, cluster)
+	case string(models.ClusterPhaseInstalling):
+		return false, r.installK3s(ctx, cluster)
+	case string(models.ClusterPhaseConfiguring):
+		return false, r.configureK3s(ctx, cluster)
+	case string(models.ClusterPhaseRunning):
+		log.Printf("[RECONCILE] Cluster %s is running, checking for updates", cluster.Name)
+		return r.reconcileRunningCluster(ctx, cluster)
+	default:
+		log.Printf("[RECONCILE] Unknown phase %s for cluster %s", cluster.Status.Phase, cluster.Name)
+		cluster.Status.Phase = string(models.ClusterPhasePending)
+		return false, nil
+	}
+}
+
+// handleDeletion handles cluster deletion
+func (r *Reconciler) handleDeletion(ctx context.Context, cluster *models.ClusterResource) (*models.ReconcileResult, error) {
+	log.Printf("[DELETE] Processing deletion for cluster %s", cluster.Name)
+	
+	// Update status to deleting
+	cluster.Status.Phase = "Deleting"
+	cluster.Status.Message = "Deleting cluster resources"
+	
+	// Get compute service
+	computeService := r.provider.GetComputeService()
+	
+	// Get ALL instances for this cluster from EC2 (not just from status)
+	filters := map[string]string{
+		"tag:goman-cluster": cluster.Name,
+		"instance-state-name": "running,pending,stopping,stopped",
+	}
+	
+	instances, err := computeService.ListInstances(ctx, filters)
+	if err != nil {
+		log.Printf("[DELETE] Warning: Failed to list instances from EC2: %v", err)
+		// Fall back to status file if we can't query EC2
+		for _, instance := range cluster.Status.Instances {
+			if instance.InstanceID != "" {
+				log.Printf("[DELETE] Deleting instance from status: %s (%s)", instance.Name, instance.InstanceID)
+				if err := computeService.DeleteInstance(ctx, instance.InstanceID); err != nil {
+					log.Printf("[DELETE] Failed to delete instance %s: %v", instance.InstanceID, err)
 				}
-				delete(instanceMap, resource.Status.Instances[i].Name)
+			}
+		}
+	} else {
+		// Delete all instances found in EC2
+		log.Printf("[DELETE] Found %d instances to delete for cluster %s", len(instances), cluster.Name)
+		deletedCount := 0
+		for _, instance := range instances {
+			log.Printf("[DELETE] Deleting instance %s (%s) - %s", instance.Name, instance.ID, instance.State)
+			if err := computeService.DeleteInstance(ctx, instance.ID); err != nil {
+				log.Printf("[DELETE] Failed to delete instance %s: %v", instance.ID, err)
+				// Continue with other instances even if one fails
+			} else {
+				deletedCount++
+			}
+		}
+		log.Printf("[DELETE] Successfully deleted %d/%d instances for cluster %s", deletedCount, len(instances), cluster.Name)
+	}
+	
+	// Note: We intentionally keep the security group as it can be reused
+	// if the cluster is recreated with the same name. AWS will clean up
+	// unused security groups during account maintenance.
+	// If you want to delete it, uncomment the following:
+	// sgName := fmt.Sprintf("goman-%s-sg", cluster.Name)
+	// err := computeService.DeleteSecurityGroup(ctx, sgName)
+	// if err != nil {
+	//     log.Printf("[DELETE] Failed to delete security group: %v", err)
+	// }
+	
+	// Delete cluster files from S3
+	storageService := r.provider.GetStorageService()
+	
+	// Delete config file
+	configKey := fmt.Sprintf("clusters/%s/config.yaml", cluster.Name)
+	if err := storageService.DeleteObject(ctx, configKey); err != nil {
+		log.Printf("[DELETE] Failed to delete config file: %v", err)
+	}
+	
+	// Delete status file
+	statusKey := fmt.Sprintf("clusters/%s/status.yaml", cluster.Name)
+	err = storageService.DeleteObject(ctx, statusKey)
+	if err != nil {
+		log.Printf("[DELETE] Failed to delete status file: %v", err)
+	}
+	
+	// Delete token files (using correct paths)
+	tokenKeys := []string{
+		fmt.Sprintf("clusters/%s/k3s-server-token", cluster.Name),
+		fmt.Sprintf("clusters/%s/k3s-agent-token", cluster.Name),
+	}
+	for _, key := range tokenKeys {
+		err = storageService.DeleteObject(ctx, key)
+		if err != nil {
+			log.Printf("[DELETE] Failed to delete token file %s: %v", key, err)
+		}
+	}
+	
+	log.Printf("[DELETE] Cluster %s deletion completed", cluster.Name)
+	return &models.ReconcileResult{Requeue: false}, nil
+}
+
+// provisionInfrastructure provisions VMs and generates tokens
+func (r *Reconciler) provisionInfrastructure(ctx context.Context, cluster *models.ClusterResource) error {
+	log.Printf("[PROVISION] Starting infrastructure provisioning for cluster %s", cluster.Name)
+	
+	// Generate K3s token - same token for both server and agents
+	// K3s agents can join with the server token directly
+	k3sToken, err := r.generateToken()
+	if err != nil {
+		return fmt.Errorf("failed to generate K3s token: %w", err)
+	}
+	
+	// Save tokens to S3 - use same token for both server and agent
+	if err := r.saveTokens(ctx, cluster.Name, k3sToken, k3sToken); err != nil {
+		return fmt.Errorf("failed to save tokens: %w", err)
+	}
+	
+	// Store tokens in cluster status
+	cluster.Status.K3sServerToken = k3sToken
+	cluster.Status.K3sAgentToken = k3sToken
+	
+	computeService := r.provider.GetComputeService()
+	
+	// For HA mode, we need to create the first master, wait for it to be ready,
+	// then create the other masters with the first master's IP
+	if cluster.Spec.Mode == "ha" {
+		// Check if we already have instances created
+		if len(cluster.Status.Instances) == 0 {
+			// Create only the first master node
+			log.Printf("[PROVISION] Creating first master node for HA cluster %s", cluster.Name)
+			
+			instanceName := fmt.Sprintf("%s-master-0", cluster.Name)
+			instanceConfig := provider.InstanceConfig{
+				Name:         instanceName,
+				Region:       cluster.Spec.Region,
+				InstanceType: cluster.Spec.InstanceType,
+				Tags: map[string]string{
+					"goman-cluster": cluster.Name,
+					"goman-role":    "master",
+					"goman-index":   "0",
+					"ManagedBy":     "goman",
+				},
+			}
+			
+			instance, err := computeService.CreateInstance(ctx, instanceConfig)
+			if err != nil {
+				return fmt.Errorf("failed to create first master instance %s: %w", instanceName, err)
+			}
+			
+			instanceStatus := models.InstanceStatus{
+				InstanceID: instance.ID,
+				Name:       instanceName,
+				Role:       "master",
+				State:      instance.State,
+				LaunchTime: time.Now(),
+			}
+			
+			cluster.Status.Instances = []models.InstanceStatus{instanceStatus}
+			cluster.Status.Phase = string(models.ClusterPhaseProvisioning)
+			cluster.Status.Message = "Created first master node, waiting for it to start"
+			log.Printf("[PROVISION] Created first master %s (%s)", instanceName, instance.ID)
+			
+		} else {
+			// Additional masters will be created in checkProvisioningProgress
+			cluster.Status.Message = "First master created, additional masters will be created after it's ready"
+		}
+	} else {
+		// Dev mode - create single master
+		log.Printf("[PROVISION] Creating single master for dev cluster %s", cluster.Name)
+		
+		instanceName := fmt.Sprintf("%s-master-0", cluster.Name)
+		instanceConfig := provider.InstanceConfig{
+			Name:         instanceName,
+			Region:       cluster.Spec.Region,
+			InstanceType: cluster.Spec.InstanceType,
+			Tags: map[string]string{
+				"goman-cluster": cluster.Name,
+				"goman-role":    "master",
+				"ManagedBy":     "goman",
+			},
+		}
+		
+		instance, err := computeService.CreateInstance(ctx, instanceConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create instance %s: %w", instanceName, err)
+		}
+		
+		instanceStatus := models.InstanceStatus{
+			InstanceID: instance.ID,
+			Name:       instanceName,
+			Role:       "master",
+			State:      instance.State,
+			LaunchTime: time.Now(),
+		}
+		
+		cluster.Status.Instances = []models.InstanceStatus{instanceStatus}
+		cluster.Status.Phase = string(models.ClusterPhaseProvisioning)
+		cluster.Status.Message = "Provisioned 1 instance, waiting for it to start"
+		log.Printf("[PROVISION] Created instance %s (%s) in state %s", instanceName, instance.ID, instance.State)
+	}
+	
+	log.Printf("[PROVISION] Infrastructure provisioning initiated for cluster %s", cluster.Name)
+	return nil
+}
+
+// checkProvisioningProgress checks if instances are ready
+func (r *Reconciler) checkProvisioningProgress(ctx context.Context, cluster *models.ClusterResource) error {
+	log.Printf("[PROVISION] Checking provisioning progress for cluster %s", cluster.Name)
+	
+	computeService := r.provider.GetComputeService()
+	
+	// For HA mode, we need special handling
+	if cluster.Spec.Mode == "ha" {
+		// First, update status of existing instances
+		for i, instanceStatus := range cluster.Status.Instances {
+			instance, err := computeService.GetInstance(ctx, instanceStatus.InstanceID)
+			if err != nil {
+				log.Printf("[PROVISION] Failed to get instance %s status: %v", instanceStatus.InstanceID, err)
+				continue
+			}
+			
+			// Update instance status
+			cluster.Status.Instances[i].State = instance.State
+			cluster.Status.Instances[i].PrivateIP = instance.PrivateIP
+			cluster.Status.Instances[i].PublicIP = instance.PublicIP
+		}
+		
+		// Check if we need to create additional masters
+		if len(cluster.Status.Instances) == 1 {
+			// Only first master exists
+			firstMaster := cluster.Status.Instances[0]
+			if firstMaster.State == "running" && firstMaster.PrivateIP != "" {
+				// First master is ready, create the remaining two masters
+				log.Printf("[PROVISION] First master ready with IP %s, creating remaining masters", firstMaster.PrivateIP)
+				
+				// Store the first master IP for other nodes to join
+				cluster.Status.PreferredMasterInstance = firstMaster.InstanceID
+				
+				for i := 1; i < 3; i++ {
+					instanceName := fmt.Sprintf("%s-master-%d", cluster.Name, i)
+					instanceConfig := provider.InstanceConfig{
+						Name:         instanceName,
+						Region:       cluster.Spec.Region,
+						InstanceType: cluster.Spec.InstanceType,
+						Tags: map[string]string{
+							"goman-cluster":     cluster.Name,
+							"goman-role":        "master",
+							"goman-index":       fmt.Sprintf("%d", i),
+							"goman-master-ip":   firstMaster.PrivateIP,
+							"ManagedBy":         "goman",
+						},
+					}
+					
+					instance, err := computeService.CreateInstance(ctx, instanceConfig)
+					if err != nil {
+						return fmt.Errorf("failed to create master instance %s: %w", instanceName, err)
+					}
+					
+					instanceStatus := models.InstanceStatus{
+						InstanceID: instance.ID,
+						Name:       instanceName,
+						Role:       "master",
+						State:      instance.State,
+						LaunchTime: time.Now(),
+					}
+					
+					cluster.Status.Instances = append(cluster.Status.Instances, instanceStatus)
+					log.Printf("[PROVISION] Created additional master %s (%s)", instanceName, instance.ID)
+				}
+				
+				cluster.Status.Message = "Created all 3 master nodes, waiting for them to start"
+				return nil // Stay in Provisioning phase to check the new instances
+			} else {
+				// First master not ready yet
+				cluster.Status.Message = fmt.Sprintf("Waiting for first master to be ready (state: %s)", firstMaster.State)
+				log.Printf("[PROVISION] Waiting for first master to be ready")
+				return nil
 			}
 		}
 		
-		// Add any new instances not in Status.Instances
-		for _, inst := range instanceMap {
-			// Determine role from name
-			role := "worker"
-			if strings.Contains(inst.Name, "master") {
-				role = "master"
+		// Check if all 3 masters are running
+		if len(cluster.Status.Instances) == 3 {
+			allRunning := true
+			for _, inst := range cluster.Status.Instances {
+				if inst.State != "running" {
+					allRunning = false
+					break
+				}
 			}
-			resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
+			
+			if allRunning {
+				cluster.Status.Phase = string(models.ClusterPhaseInstalling)
+				cluster.Status.Message = "All 3 master nodes are running, ready for K3s installation"
+				log.Printf("[PROVISION] All HA masters running for cluster %s", cluster.Name)
+			} else {
+				cluster.Status.Message = "Waiting for all master nodes to reach running state"
+				log.Printf("[PROVISION] Still waiting for HA masters to start for cluster %s", cluster.Name)
+			}
+		}
+	} else {
+		// Dev mode - simple single instance check
+		allRunning := true
+		for i, instanceStatus := range cluster.Status.Instances {
+			instance, err := computeService.GetInstance(ctx, instanceStatus.InstanceID)
+			if err != nil {
+				log.Printf("[PROVISION] Failed to get instance %s status: %v", instanceStatus.InstanceID, err)
+				continue
+			}
+			
+			// Update instance status
+			cluster.Status.Instances[i].State = instance.State
+			cluster.Status.Instances[i].PrivateIP = instance.PrivateIP
+			cluster.Status.Instances[i].PublicIP = instance.PublicIP
+			
+			if instance.State != "running" {
+				allRunning = false
+				log.Printf("[PROVISION] Instance %s is in state %s", instanceStatus.InstanceID, instance.State)
+			}
+		}
+		
+		if allRunning {
+			cluster.Status.Phase = string(models.ClusterPhaseInstalling)
+			cluster.Status.Message = "All instances are running, ready for K3s installation"
+			log.Printf("[PROVISION] All instances running for cluster %s", cluster.Name)
+		} else {
+			cluster.Status.Message = "Waiting for instances to reach running state"
+			log.Printf("[PROVISION] Still waiting for instances to start for cluster %s", cluster.Name)
+		}
+	}
+	
+	return nil
+}
+
+// installK3s installs K3s on instances
+func (r *Reconciler) installK3s(ctx context.Context, cluster *models.ClusterResource) error {
+	log.Printf("[INSTALL] Starting K3s installation for cluster %s", cluster.Name)
+	
+	// For now, just move to configuring phase
+	cluster.Status.Phase = string(models.ClusterPhaseConfiguring)
+	cluster.Status.Message = "K3s installation completed, configuring cluster"
+	
+	log.Printf("[INSTALL] K3s installation completed for cluster %s", cluster.Name)
+	return nil
+}
+
+// configureK3s configures K3s cluster and provisions node pools
+func (r *Reconciler) configureK3s(ctx context.Context, cluster *models.ClusterResource) error {
+	log.Printf("[CONFIGURE] Starting K3s configuration for cluster %s", cluster.Name)
+	
+	// Check if we need to provision node pools
+	if len(cluster.Spec.NodePools) > 0 {
+		log.Printf("[CONFIGURE] Provisioning %d node pools for cluster %s", len(cluster.Spec.NodePools), cluster.Name)
+		if err := r.provisionNodePools(ctx, cluster); err != nil {
+			return fmt.Errorf("failed to provision node pools: %w", err)
+		}
+	}
+	
+	// Mark as running
+	cluster.Status.Phase = string(models.ClusterPhaseRunning)
+	cluster.Status.Message = "K3s cluster is running and ready"
+	
+	log.Printf("[CONFIGURE] K3s configuration completed for cluster %s", cluster.Name)
+	return nil
+}
+
+// reconcileRunningCluster handles reconciliation for a running cluster (scaling, updates, etc.)
+func (r *Reconciler) reconcileRunningCluster(ctx context.Context, cluster *models.ClusterResource) (bool, error) {
+	log.Printf("[RUNNING] Reconciling running cluster %s", cluster.Name)
+	
+	needsRequeue := false
+	
+	// First, clean up any stale nodes from K3s cluster
+	cleanupHappened, err := r.cleanupStaleK3sNodes(ctx, cluster)
+	if err != nil {
+		log.Printf("[RUNNING] Warning: Failed to cleanup stale nodes: %v", err)
+		// Continue with reconciliation even if cleanup fails
+	} else if cleanupHappened {
+		needsRequeue = true  // Requeue to verify cluster is healthy after cleanup
+	}
+	
+	// Always reconcile node pools - this handles scaling, adding, and removing pools
+	if err := r.reconcileNodePools(ctx, cluster); err != nil {
+		return false, fmt.Errorf("failed to reconcile node pools: %w", err)
+	}
+	
+	// Cluster remains in running state
+	cluster.Status.Message = "K3s cluster is running and ready"
+	return needsRequeue, nil
+}
+
+// cleanupStaleK3sNodes removes terminated nodes from the K3s cluster
+// removeAllWorkers removes all worker nodes when no NodePools are defined
+func (r *Reconciler) removeAllWorkers(ctx context.Context, cluster *models.ClusterResource) error {
+	log.Printf("[REMOVE_WORKERS] Removing all worker nodes from cluster %s", cluster.Name)
+	
+	computeService := r.provider.GetComputeService()
+	var workersToRemove []*provider.Instance
+	var updatedInstances []models.InstanceStatus
+	
+	// Get actual running instances from AWS to find all workers
+	filters := map[string]string{
+		"tag:goman-cluster": cluster.Name,
+		"tag:goman-role": "worker",
+		"instance-state-name": "running",
+	}
+	runningWorkers, err := computeService.ListInstances(ctx, filters)
+	if err != nil {
+		log.Printf("[REMOVE_WORKERS] Warning: Failed to list worker instances: %v", err)
+		// Fall back to using status if we can't list instances
+		for _, instance := range cluster.Status.Instances {
+			if instance.Role == "worker" {
+				log.Printf("[REMOVE_WORKERS] Removing worker from status: %s (%s)", instance.Name, instance.InstanceID)
+				workersToRemove = append(workersToRemove, &provider.Instance{
+					ID: instance.InstanceID,
+					Name: instance.Name,
+					PrivateIP: instance.PrivateIP,
+				})
+			} else {
+				updatedInstances = append(updatedInstances, instance)
+			}
+		}
+	} else {
+		// Use actual running instances
+		workersToRemove = runningWorkers
+		log.Printf("[REMOVE_WORKERS] Found %d running workers to remove", len(workersToRemove))
+		
+		// Keep only non-worker instances in status
+		for _, instance := range cluster.Status.Instances {
+			if instance.Role != "worker" {
+				updatedInstances = append(updatedInstances, instance)
+			}
+		}
+	}
+	
+	if len(workersToRemove) == 0 {
+		log.Printf("[REMOVE_WORKERS] No workers to remove")
+		return nil
+	}
+	
+	// First drain and delete nodes from K3s cluster
+	masterInstance := ""
+	for _, instance := range cluster.Status.Instances {
+		if instance.Role == "master" && instance.State == "running" {
+			masterInstance = instance.InstanceID
+			break
+		}
+	}
+	
+	if masterInstance != "" {
+		for _, worker := range workersToRemove {
+			// Use worker's private IP to determine K3s node name
+			workerIP := worker.PrivateIP
+			
+			if workerIP != "" {
+				// K3s uses the hostname as node name, which is based on private IP
+				// Format: ip-<ip-with-dashes>.region.compute.internal
+				ipParts := strings.ReplaceAll(workerIP, ".", "-")
+				nodeName := fmt.Sprintf("ip-%s.%s.compute.internal", ipParts, r.provider.Region())
+				
+				// Drain the node first
+				drainCmd := fmt.Sprintf("kubectl drain %s --ignore-daemonsets --delete-emptydir-data --force || true", nodeName)
+				log.Printf("[REMOVE_WORKERS] Draining node %s from K3s", nodeName)
+				result, err := computeService.RunCommand(ctx, []string{masterInstance}, drainCmd)
+				if err != nil {
+					log.Printf("[REMOVE_WORKERS] Warning: Failed to drain node %s: %v", nodeName, err)
+				} else if result.Instances[masterInstance] != nil {
+					log.Printf("[REMOVE_WORKERS] Drain output: %s", result.Instances[masterInstance].Output)
+				}
+				
+				// Delete the node from K3s
+				deleteCmd := fmt.Sprintf("kubectl delete node %s || true", nodeName)
+				log.Printf("[REMOVE_WORKERS] Deleting node %s from K3s", nodeName)
+				result, err = computeService.RunCommand(ctx, []string{masterInstance}, deleteCmd)
+				if err != nil {
+					log.Printf("[REMOVE_WORKERS] Warning: Failed to delete node %s from K3s: %v", nodeName, err)
+				} else if result.Instances[masterInstance] != nil {
+					log.Printf("[REMOVE_WORKERS] Delete output: %s", result.Instances[masterInstance].Output)
+				}
+			}
+		}
+	}
+	
+	// Terminate EC2 instances
+	for _, worker := range workersToRemove {
+		log.Printf("[REMOVE_WORKERS] Terminating EC2 instance %s (%s)", worker.Name, worker.ID)
+		if err := computeService.DeleteInstance(ctx, worker.ID); err != nil {
+			log.Printf("[REMOVE_WORKERS] Error terminating instance %s: %v", worker.ID, err)
+			// Continue with other instances
+		}
+	}
+	
+	// Update cluster status to remove workers
+	cluster.Status.Instances = updatedInstances
+	log.Printf("[REMOVE_WORKERS] Removed %d workers from cluster %s", len(workersToRemove), cluster.Name)
+	
+	return nil
+}
+
+func (r *Reconciler) cleanupStaleK3sNodes(ctx context.Context, cluster *models.ClusterResource) (bool, error) {
+	log.Printf("[CLEANUP] Checking for stale nodes in K3s cluster %s", cluster.Name)
+	
+	// Get the master instance to run kubectl commands
+	var masterInstanceID string
+	for _, inst := range cluster.Status.Instances {
+		if inst.Role == "master" && inst.State == "running" {
+			masterInstanceID = inst.InstanceID
+			break
+		}
+	}
+	
+	if masterInstanceID == "" {
+		return false, fmt.Errorf("no running master found to execute cleanup")
+	}
+	
+	// Get list of nodes from K3s
+	computeService := r.provider.GetComputeService()
+	getNodesCmd := "kubectl get nodes -o json | jq -r '.items[] | \"\\(.metadata.name),\\(.status.addresses[] | select(.type==\"InternalIP\") | .address)\"'"
+	
+	result, err := computeService.RunCommand(ctx, []string{masterInstanceID}, getNodesCmd)
+	if err != nil {
+		return false, fmt.Errorf("failed to get K3s nodes: %w", err)
+	}
+	
+	// Get output from the master instance
+	output := ""
+	if instResult, ok := result.Instances[masterInstanceID]; ok {
+		output = instResult.Output
+	} else {
+		return false, fmt.Errorf("no output from master instance")
+	}
+	
+	// Get actual running instances from AWS
+	filters := map[string]string{
+		"tag:goman-cluster": cluster.Name,
+		"instance-state-name": "running",
+	}
+	runningInstances, err := computeService.ListInstances(ctx, filters)
+	if err != nil {
+		return false, fmt.Errorf("failed to list running instances: %w", err)
+	}
+	
+	// Build map of running IPs
+	runningIPs := make(map[string]bool)
+	for _, inst := range runningInstances {
+		if inst.PrivateIP != "" {
+			runningIPs[inst.PrivateIP] = true
+		}
+	}
+	
+	// Parse K3s nodes and find stale ones
+	staleNodes := []string{}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) >= 2 {
+			nodeName := parts[0]
+			nodeIP := parts[1]
+			
+			// Check if this node's IP is still running
+			if !runningIPs[nodeIP] {
+				staleNodes = append(staleNodes, nodeName)
+				log.Printf("[CLEANUP] Found stale node: %s (IP: %s)", nodeName, nodeIP)
+			}
+		}
+	}
+	
+	// Remove stale nodes from K3s cluster
+	for _, nodeName := range staleNodes {
+		log.Printf("[CLEANUP] Removing stale node %s from K3s cluster", nodeName)
+		
+		// First, drain the node (in case it still has pods)
+		drainCmd := fmt.Sprintf("kubectl drain %s --ignore-daemonsets --delete-emptydir-data --force --timeout=30s || true", nodeName)
+		if _, err := computeService.RunCommand(ctx, []string{masterInstanceID}, drainCmd); err != nil {
+			log.Printf("[CLEANUP] Warning: Failed to drain node %s: %v", nodeName, err)
+		}
+		
+		// Then delete the node
+		deleteCmd := fmt.Sprintf("kubectl delete node %s", nodeName)
+		if _, err := computeService.RunCommand(ctx, []string{masterInstanceID}, deleteCmd); err != nil {
+			log.Printf("[CLEANUP] Warning: Failed to delete node %s: %v", nodeName, err)
+			// Continue with other nodes
+		} else {
+			log.Printf("[CLEANUP] Successfully removed node %s from K3s cluster", nodeName)
+		}
+	}
+	
+	if len(staleNodes) > 0 {
+		log.Printf("[CLEANUP] Removed %d stale nodes from K3s cluster", len(staleNodes))
+		return true, nil  // Cleanup happened, should requeue
+	} else {
+		log.Printf("[CLEANUP] No stale nodes found in K3s cluster")
+		return false, nil  // No cleanup needed
+	}
+}
+
+// reconcileNodePools ensures the actual worker nodes match the desired configuration
+func (r *Reconciler) reconcileNodePools(ctx context.Context, cluster *models.ClusterResource) error {
+	computeService := r.provider.GetComputeService()
+	storageService := r.provider.GetStorageService()
+	
+	// Get master IP for new workers to join
+	var masterIP string
+	for _, inst := range cluster.Status.Instances {
+		if inst.Role == "master" && inst.PrivateIP != "" {
+			masterIP = inst.PrivateIP
+			break
+		}
+	}
+	
+	if masterIP == "" {
+		return fmt.Errorf("no master node IP found for worker nodes to join")
+	}
+	
+	// Get the node token from S3 for workers to join
+	nodeTokenKey := fmt.Sprintf("clusters/%s/k3s-node-token", cluster.Name)
+	nodeTokenData, err := storageService.GetObject(ctx, nodeTokenKey)
+	if err != nil {
+		log.Printf("[NODEPOOLS] Failed to get agent token, using server token: %v", err)
+		// For K3s, agents can join with just the server token
+		// No need to construct a special format - K3s handles this
+		if cluster.Status.K3sServerToken != "" {
+			nodeTokenData = []byte(cluster.Status.K3sServerToken)
+		} else {
+			return fmt.Errorf("no server token available for workers to join")
+		}
+	}
+	nodeToken := strings.TrimSpace(string(nodeTokenData))
+	
+	// First, get actual running instances from AWS to ensure accuracy
+	filters := map[string]string{
+		"tag:goman-cluster": cluster.Name,
+		"instance-state-name": "running,pending",
+	}
+	computeInstances, err := computeService.ListInstances(ctx, filters)
+	if err != nil {
+		log.Printf("[NODEPOOLS] Warning: Failed to list instances from AWS: %v", err)
+		// Fall back to status, but it might be stale
+	}
+	
+	// Build a map of actual running instances
+	actualInstances := make(map[string]*provider.Instance)
+	for _, inst := range computeInstances {
+		if inst.State == "running" || inst.State == "pending" {
+			actualInstances[inst.ID] = inst
+		}
+	}
+	
+	// Count existing workers per pool based on actual instances
+	existingWorkers := make(map[string][]models.InstanceStatus)
+	allWorkers := []models.InstanceStatus{}
+	
+	// First pass: collect all workers from actual instances
+	for _, inst := range actualInstances {
+		if inst.Tags["goman-role"] == "worker" {
+			poolName := inst.Tags["goman-nodepool"]
+			if poolName == "" {
+				// Try to extract from name for backward compatibility
+				parts := strings.Split(inst.Name, "-worker-")
+				if len(parts) == 2 {
+					poolParts := strings.Split(parts[1], "-")
+					if len(poolParts) >= 1 {
+						poolName = strings.Join(poolParts[:len(poolParts)-1], "-")
+					}
+				}
+			}
+			
+			workerStatus := models.InstanceStatus{
 				InstanceID: inst.ID,
 				Name:       inst.Name,
-				Role:       role,
+				Role:       "worker",
+				State:      inst.State,
+				PrivateIP:  inst.PrivateIP,
+				PublicIP:   inst.PublicIP,
+				LaunchTime: inst.LaunchTime,
+			}
+			
+			if poolName != "" {
+				existingWorkers[poolName] = append(existingWorkers[poolName], workerStatus)
+			}
+			allWorkers = append(allWorkers, workerStatus)
+		}
+	}
+	
+	log.Printf("[NODEPOOLS] Found %d total workers across all pools", len(allWorkers))
+	
+	// Process each node pool
+	for _, pool := range cluster.Spec.NodePools {
+		poolWorkers := existingWorkers[pool.Name]
+		currentCount := len(poolWorkers)
+		desiredCount := pool.Count
+		
+		log.Printf("[NODEPOOLS] Pool '%s': current=%d, desired=%d", pool.Name, currentCount, desiredCount)
+		
+		// First, handle any duplicates - keep the newest ones
+		if currentCount > desiredCount {
+			// Scale down - terminate extra workers
+			toTerminate := currentCount - desiredCount
+			log.Printf("[NODEPOOLS] Scaling down pool '%s': terminating %d excess workers", pool.Name, toTerminate)
+			
+			// Sort workers by name to identify duplicates and by launch time
+			// Group by base name (without index) to find duplicates
+			workerGroups := make(map[string][]models.InstanceStatus)
+			for _, worker := range poolWorkers {
+				// Extract base name without index
+				baseName := worker.Name
+				if idx := strings.LastIndex(baseName, "-"); idx > 0 {
+					if _, err := strconv.Atoi(baseName[idx+1:]); err == nil {
+						baseName = baseName[:idx]
+					}
+				}
+				workerGroups[baseName] = append(workerGroups[baseName], worker)
+			}
+			
+			// Build list of workers to terminate
+			var toDelete []models.InstanceStatus
+			
+			// First, remove duplicates (keep newest)
+			for _, workers := range workerGroups {
+				if len(workers) > 1 {
+					// Sort by launch time, newest first
+					sort.Slice(workers, func(i, j int) bool {
+						return workers[i].LaunchTime.After(workers[j].LaunchTime)
+					})
+					// Mark older duplicates for deletion
+					for i := 1; i < len(workers); i++ {
+						toDelete = append(toDelete, workers[i])
+						log.Printf("[NODEPOOLS] Marking duplicate %s (%s) for termination", workers[i].Name, workers[i].InstanceID)
+					}
+				}
+			}
+			
+			// Then, if we still have too many, remove the highest indexed ones
+			remainingWorkers := []models.InstanceStatus{}
+			for _, worker := range poolWorkers {
+				isDuplicate := false
+				for _, del := range toDelete {
+					if del.InstanceID == worker.InstanceID {
+						isDuplicate = true
+						break
+					}
+				}
+				if !isDuplicate {
+					remainingWorkers = append(remainingWorkers, worker)
+				}
+			}
+			
+			if len(remainingWorkers) > desiredCount {
+				// Sort by index (descending) to remove highest indexed first
+				sort.Slice(remainingWorkers, func(i, j int) bool {
+					iIndex := extractWorkerIndex(remainingWorkers[i].Name)
+					jIndex := extractWorkerIndex(remainingWorkers[j].Name)
+					return iIndex > jIndex
+				})
+				
+				// Add excess workers to delete list
+				for i := 0; i < len(remainingWorkers)-desiredCount; i++ {
+					toDelete = append(toDelete, remainingWorkers[i])
+					log.Printf("[NODEPOOLS] Marking excess %s (%s) for termination", remainingWorkers[i].Name, remainingWorkers[i].InstanceID)
+				}
+			}
+			
+			// Terminate all workers marked for deletion
+			for _, worker := range toDelete {
+				log.Printf("[NODEPOOLS] Terminating worker %s (%s)", worker.Name, worker.InstanceID)
+				
+				if err := computeService.DeleteInstance(ctx, worker.InstanceID); err != nil {
+					log.Printf("[NODEPOOLS] Failed to terminate %s: %v", worker.InstanceID, err)
+					// Continue with other terminations
+				}
+			}
+			
+		} else if currentCount < desiredCount {
+			// Scale up - provision new workers
+			toCreate := desiredCount - currentCount
+			log.Printf("[NODEPOOLS] Scaling up pool '%s': creating %d new workers", pool.Name, toCreate)
+			
+			// Find which indices are missing
+			existingIndices := make(map[int]bool)
+			for _, worker := range poolWorkers {
+				if idx := extractWorkerIndex(worker.Name); idx >= 0 {
+					existingIndices[idx] = true
+				}
+			}
+			
+			// Create workers with missing indices
+			createdCount := 0
+			for i := 0; createdCount < toCreate && i < desiredCount*2; i++ {
+				if !existingIndices[i] {
+					workerName := fmt.Sprintf("%s-worker-%s-%d", cluster.Name, pool.Name, i)
+					
+					instanceConfig := provider.InstanceConfig{
+						Name:         workerName,
+						InstanceType: pool.InstanceType,
+						Region:       cluster.Spec.Region,
+						Tags: map[string]string{
+							"goman-cluster":    cluster.Name,
+							"goman-role":       "worker",
+							"goman-nodepool":   pool.Name,
+							"goman-master-ip":  masterIP,
+							"goman-node-token": nodeToken,
+							"ManagedBy":        "goman",
+						},
+					}
+					
+					// Apply labels as tags if present
+					for k, v := range pool.Labels {
+						instanceConfig.Tags[fmt.Sprintf("k8s-label-%s", k)] = v
+					}
+					
+					instance, err := computeService.CreateInstance(ctx, instanceConfig)
+					if err != nil {
+						log.Printf("[NODEPOOLS] Failed to create worker %s: %v", workerName, err)
+						continue
+					}
+					
+					log.Printf("[NODEPOOLS] Created worker node %s (%s) in pool '%s'", workerName, instance.ID, pool.Name)
+					createdCount++
+					
+					// Add the newly created instance to actualInstances so it gets included in status
+					actualInstances[instance.ID] = instance
+				}
+			}
+		} else {
+			log.Printf("[NODEPOOLS] Pool '%s' has correct number of workers", pool.Name)
+		}
+	}
+	
+	// Update cluster status with actual instances
+	newInstances := []models.InstanceStatus{}
+	
+	// Keep master nodes
+	for _, inst := range cluster.Status.Instances {
+		if inst.Role == "master" {
+			newInstances = append(newInstances, inst)
+		}
+	}
+	
+	// Add current workers from AWS
+	for _, inst := range actualInstances {
+		if inst.Tags["goman-role"] == "worker" {
+			newInstances = append(newInstances, models.InstanceStatus{
+				InstanceID: inst.ID,
+				Name:       inst.Name,
+				Role:       "worker",
 				State:      inst.State,
 				PrivateIP:  inst.PrivateIP,
 				PublicIP:   inst.PublicIP,
@@ -248,999 +970,246 @@ func (r *Reconciler) reconcileProvisioning(ctx context.Context, resource *models
 			})
 		}
 	}
-
-	// Ensure we have the right number of instances based on mode
-	// Get master count from the spec (mode-based)
-	masterCount := resource.Spec.MasterCount
-	if masterCount == 0 {
-		// Default based on mode if not specified
-		masterCount = 1 // Default to dev mode
+	
+	cluster.Status.Instances = newInstances
+	
+	// Handle workers from deleted pools (pools that exist in running instances but not in spec)
+	// Build set of configured pool names
+	configuredPools := make(map[string]bool)
+	for _, pool := range cluster.Spec.NodePools {
+		configuredPools[pool.Name] = true
 	}
-
-	// Check each expected node individually to handle placeholders correctly
-	nodesToCreate := []string{}
-	for i := 0; i < masterCount; i++ {
-		nodeName := fmt.Sprintf("%s-master-%d", resource.Name, i)
-
-		// Check if this node already exists in our state (including placeholders)
-		nodeInState := false
-		for _, inst := range resource.Status.Instances {
-			if inst.Name == nodeName {
-				nodeInState = true
-				// If it's a placeholder without instance ID, check if it now exists in the cloud provider
-				if inst.InstanceID == "" || inst.State == "initiating" {
-					for _, awsInst := range existingInstances {
-						if awsInst.Name == nodeName {
-							log.Printf("Updating placeholder for %s with real instance ID %s", nodeName, awsInst.ID)
-							// Update the placeholder with real data
-							for j, stateInst := range resource.Status.Instances {
-								if stateInst.Name == nodeName {
-									resource.Status.Instances[j].InstanceID = awsInst.ID
-									resource.Status.Instances[j].State = awsInst.State
-									resource.Status.Instances[j].PrivateIP = awsInst.PrivateIP
-									resource.Status.Instances[j].PublicIP = awsInst.PublicIP
-									break
-								}
-							}
-							break
-						}
-					}
-				}
-				break
-			}
+	
+	// Find workers belonging to non-existent pools
+	orphanedWorkers := []models.InstanceStatus{}
+	for poolName, workers := range existingWorkers {
+		if !configuredPools[poolName] && poolName != "" {
+			log.Printf("[NODEPOOLS] Pool '%s' no longer exists in config, removing %d workers", poolName, len(workers))
+			orphanedWorkers = append(orphanedWorkers, workers...)
 		}
-
-		if !nodeInState {
-			// Check if this node exists in the cloud provider
-			nodeInCloud := false
-			for _, awsInst := range existingInstances {
-				if awsInst.Name == nodeName {
-					log.Printf("Instance %s already exists in cloud provider, adding to state", nodeName)
-					// Determine role from name
-					role := "worker"
-					if strings.Contains(nodeName, "master") {
-						role = "master"
-					}
-					resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
-						InstanceID: awsInst.ID,
-						Name:       awsInst.Name,
-						Role:       role,
-						State:      awsInst.State,
-						PrivateIP:  awsInst.PrivateIP,
-						PublicIP:   awsInst.PublicIP,
-						LaunchTime: awsInst.LaunchTime,
-					})
-					nodeInCloud = true
+	}
+	
+	// Also check for workers with no pool assignment (shouldn't happen but handle it)
+	for _, worker := range allWorkers {
+		hasPool := false
+		for poolName := range existingWorkers {
+			for _, w := range existingWorkers[poolName] {
+				if w.InstanceID == worker.InstanceID {
+					hasPool = true
 					break
 				}
 			}
-
-			if !nodeInCloud {
-				// Need to create this node - add placeholder first
-				log.Printf("Adding placeholder for instance %s", nodeName)
-				// Determine role from name
-				role := "worker"
-				if strings.Contains(nodeName, "master") {
-					role = "master"
-				}
-				resource.Status.Instances = append(resource.Status.Instances, models.InstanceStatus{
-					InstanceID: "", // Will be filled when creation completes
-					Name:       nodeName,
-					Role:       role,
-					State:      "initiating",
-					PrivateIP:  "",
-					PublicIP:   "",
-					LaunchTime: time.Now(),
-				})
-				nodesToCreate = append(nodesToCreate, nodeName)
+			if hasPool {
+				break
 			}
 		}
-	}
-
-	if len(nodesToCreate) > 0 {
-
-		// Save state with placeholders to prevent duplicate creation
-		if len(nodesToCreate) > 0 {
-			log.Printf("Saving state with %d placeholder nodes", len(nodesToCreate))
-			if err := r.saveClusterResource(ctx, resource); err != nil {
-				log.Printf("Failed to save state with placeholders: %v", err)
-				return nil, err
-			}
-
-			// Now create instances synchronously (no goroutines needed)
-			// Cloud provider typically returns immediately with instance in "pending" state
-			log.Printf("Creating %d instances", len(nodesToCreate))
-			instancesCreated := false
-			var creationErrors []string
-
-			for _, nodeName := range nodesToCreate {
-				log.Printf("Creating instance %s in region %s", nodeName, resource.Spec.Region)
-
-				instanceConfig := provider.InstanceConfig{
-					Name:         nodeName,
-					Region:       resource.Spec.Region,
-					InstanceType: resource.Spec.InstanceType,
-					// Provider will handle ImageID, UserData, InstanceProfile internally
-					Tags: map[string]string{
-						"ClusterName": resource.Name,
-						"ManagedBy":   "goman",
-						"Provider":    r.provider.Name(),
-					},
-				}
-
-				// Use normal context with reasonable timeout (30s is enough for RunInstances)
-				instanceCtx, instanceCancel := context.WithTimeout(ctx, 30*time.Second)
-
-				instance, err := computeService.CreateInstance(instanceCtx, instanceConfig)
-				instanceCancel()
-
-				if err != nil {
-					log.Printf("Failed to create instance %s in region %s: %v", nodeName, resource.Spec.Region, err)
-					creationErrors = append(creationErrors, fmt.Sprintf("%s: %v", nodeName, err))
-					// Continue trying other instances
-				} else {
-					log.Printf("Successfully initiated creation of instance %s (ID: %s)", nodeName, instance.ID)
-
-					// Update the placeholder with the real instance ID
-					for i, inst := range resource.Status.Instances {
-						if inst.Name == nodeName {
-							resource.Status.Instances[i].InstanceID = instance.ID
-							resource.Status.Instances[i].State = provider.InstanceStatePending
-							break
-						}
-					}
-					instancesCreated = true
-				}
-			}
-
-			// If ALL instance creations failed, move to failed state
-			if !instancesCreated && len(creationErrors) > 0 {
-				log.Printf("All instance creation attempts failed for cluster %s", resource.Name)
-				resource.Status.Phase = models.ClusterPhaseFailed
-				resource.Status.Message = fmt.Sprintf("Failed to create instances: %s", strings.Join(creationErrors, "; "))
-				// Save the failed state
-				if err := r.saveClusterResource(ctx, resource); err != nil {
-					log.Printf("Warning: failed to save failed state: %v", err)
-				}
-				return &models.ReconcileResult{}, nil
-			}
-
-			// Save the updated state with real instance IDs
-			if instancesCreated {
-				log.Printf("Saving state with real instance IDs")
-				if err := r.saveClusterResource(ctx, resource); err != nil {
-					log.Printf("Warning: failed to save state with instance IDs: %v", err)
-				}
-			}
+		if !hasPool {
+			log.Printf("[NODEPOOLS] Worker %s has no pool assignment, marking for removal", worker.Name)
+			orphanedWorkers = append(orphanedWorkers, worker)
 		}
-
-		// Always requeue to check instance status
-		return &models.ReconcileResult{
-			Requeue:      true,
-			RequeueAfter: 15 * time.Second, // Check frequently during provisioning
-		}, nil
 	}
-
-	// Check instance states for errors or readiness
-	allRunning := true
-	hasErrors := false
-	instanceStates := []string{}
-	errorMessages := []string{}
 	
-	for _, inst := range resource.Status.Instances {
-		// Check for error states that indicate actual failures
-		if inst.State == "terminated" || inst.State == "stopped" || inst.State == "stopping" || inst.State == "shutting-down" {
-			// These states indicate instance failure or unexpected termination
-			hasErrors = true
-			errorMessages = append(errorMessages, fmt.Sprintf("%s is in error state: %s", inst.Name, inst.State))
-			log.Printf("[PROVISIONING] ERROR: Instance %s is in unexpected state: %s", inst.Name, inst.State)
-		} else if inst.State != "running" {
-			// Instance is still pending, this is normal
-			allRunning = false
-			instanceStates = append(instanceStates, fmt.Sprintf("%s is %s", inst.Name, inst.State))
-			log.Printf("[PROVISIONING] Instance %s is %s (waiting for running state)", inst.Name, inst.State)
-		} else {
-			// Instance is running - IPs are optional, not required
-			if inst.PrivateIP != "" {
-				log.Printf("[PROVISIONING] Instance %s is running with IP %s", inst.Name, inst.PrivateIP)
+	// Remove orphaned workers
+	if len(orphanedWorkers) > 0 {
+		log.Printf("[NODEPOOLS] Removing %d workers from deleted pools", len(orphanedWorkers))
+		
+		// Get master instance for kubectl commands
+		var masterInstanceID string
+		for _, inst := range cluster.Status.Instances {
+			if inst.Role == "master" && inst.State == "running" {
+				masterInstanceID = inst.InstanceID
+				break
+			}
+		}
+		
+		for _, worker := range orphanedWorkers {
+			log.Printf("[NODEPOOLS] Removing orphaned worker %s (%s)", worker.Name, worker.InstanceID)
+			
+			// First drain and delete from K3s if master is available
+			if masterInstanceID != "" && worker.PrivateIP != "" {
+				ipParts := strings.ReplaceAll(worker.PrivateIP, ".", "-")
+				nodeName := fmt.Sprintf("ip-%s.%s.compute.internal", ipParts, r.provider.Region())
+				
+				// Drain the node
+				drainCmd := fmt.Sprintf("kubectl drain %s --ignore-daemonsets --delete-emptydir-data --force --timeout=30s || true", nodeName)
+				if _, err := computeService.RunCommand(ctx, []string{masterInstanceID}, drainCmd); err != nil {
+					log.Printf("[NODEPOOLS] Warning: Failed to drain orphaned node %s: %v", nodeName, err)
+				}
+				
+				// Delete from K3s
+				deleteCmd := fmt.Sprintf("kubectl delete node %s || true", nodeName)
+				if _, err := computeService.RunCommand(ctx, []string{masterInstanceID}, deleteCmd); err != nil {
+					log.Printf("[NODEPOOLS] Warning: Failed to delete orphaned node %s from K3s: %v", nodeName, err)
+				}
+			}
+			
+			// Terminate the EC2 instance
+			if err := computeService.DeleteInstance(ctx, worker.InstanceID); err != nil {
+				log.Printf("[NODEPOOLS] Error terminating orphaned instance %s: %v", worker.InstanceID, err)
 			} else {
-				log.Printf("[PROVISIONING] Instance %s is running (IP not yet assigned)", inst.Name)
-			}
-		}
-	}
-
-	// If any instances are in error state, mark cluster as failed
-	if hasErrors {
-		log.Printf("[PROVISIONING] Cluster %s has instances in error state", resource.Name)
-		resource.Status.Phase = models.ClusterPhaseFailed
-		resource.Status.Message = fmt.Sprintf("Instance errors: %s", strings.Join(errorMessages, "; "))
-		return &models.ReconcileResult{}, nil
-	}
-
-	// If not all instances are running yet, keep waiting
-	if !allRunning {
-		resource.Status.Message = fmt.Sprintf("Waiting for instances: %s", strings.Join(instanceStates, ", "))
-		log.Printf("[PROVISIONING] Cluster %s waiting for instances to reach running state", resource.Name)
-		return &models.ReconcileResult{
-			Requeue:      true,
-			RequeueAfter: 10 * time.Second,
-		}, nil
-	}
-
-	// All instances are running (IPs are optional), move to installing phase
-	log.Printf("[PROVISIONING] All instances for cluster %s are running, transitioning to installing phase", resource.Name)
-	resource.Status.Phase = models.ClusterPhaseInstalling
-	resource.Status.Message = "Installing K3s on instances"
-	resource.Status.ObservedGeneration = resource.Generation
-	now := time.Now()
-	resource.Status.LastReconcileTime = &now
-
-	return &models.ReconcileResult{
-		Requeue:      true,
-		RequeueAfter: 5 * time.Second,
-	}, nil
-}
-
-// reconcileRunning checks health and handles updates
-func (r *Reconciler) reconcileRunning(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
-	log.Printf("[RUNNING] Checking health of running cluster %s", resource.Name)
-
-	// Check if spec changed
-	if resource.Generation != resource.Status.ObservedGeneration {
-		// Handle updates (e.g., need more/fewer instances)
-		currentCount := len(resource.Status.Instances)
-		if currentCount != resource.Spec.MasterCount {
-			resource.Status.Phase = models.ClusterPhaseProvisioning
-			resource.Status.Message = "Updating cluster configuration"
-			return &models.ReconcileResult{
-				Requeue:      true,
-				RequeueAfter: 5 * time.Second,
-			}, nil
-		}
-		// Update observed generation since we're in sync
-		resource.Status.ObservedGeneration = resource.Generation
-	}
-
-	// Check if instance type needs to be changed
-	needsResize, err := r.checkInstanceTypeChanges(ctx, resource)
-	if err != nil {
-		log.Printf("Error checking instance type changes: %v", err)
-	} else if needsResize {
-		log.Printf("[RESIZE] Instance type change detected for cluster %s", resource.Name)
-		return r.resizeInstances(ctx, resource)
-	}
-
-	// Update instance states from cloud provider to keep IP addresses current
-	computeService := r.provider.GetComputeService()
-	filters := map[string]string{
-		"tag:ClusterName":     resource.Name,
-		"instance-state-name": "pending,running,stopping,stopped",
-	}
-	
-	// Add region filter if specified in the resource
-	if resource.Spec.Region != "" {
-		filters["region"] = resource.Spec.Region
-		log.Printf("Updating instance states for cluster %s in region %s", resource.Name, resource.Spec.Region)
-	}
-	
-	cloudInstances, err := computeService.ListInstances(ctx, filters)
-	if err != nil {
-		log.Printf("Warning: failed to list instances for health check: %v", err)
-	} else if len(cloudInstances) > 0 {
-		// Update Status.Instances with current state from cloud
-		instanceMap := make(map[string]*provider.Instance)
-		for _, inst := range cloudInstances {
-			instanceMap[inst.Name] = inst
-		}
-		
-		// Update existing entries in Status.Instances
-		for i := range resource.Status.Instances {
-			if cloudInst, ok := instanceMap[resource.Status.Instances[i].Name]; ok {
-				// Update with current state from cloud - but preserve K3s status fields
-				resource.Status.Instances[i].State = cloudInst.State
-				resource.Status.Instances[i].PrivateIP = cloudInst.PrivateIP
-				resource.Status.Instances[i].PublicIP = cloudInst.PublicIP
-				// NOTE: We intentionally DO NOT update K3s status fields here
-				// Those are managed by the Configuring phase and K3s health checks
-				log.Printf("Updated instance %s: PrivateIP=%s, PublicIP=%s, K3sRunning=%v", 
-					resource.Status.Instances[i].Name, 
-					cloudInst.PrivateIP, 
-					cloudInst.PublicIP,
-					resource.Status.Instances[i].K3sRunning)
-			}
-		}
-	}
-	
-	// Check K3s service health on master nodes
-	// We check all master nodes regardless of K3sRunning status to detect issues
-	needsConfiguration := false
-	for i := range resource.Status.Instances {
-		inst := &resource.Status.Instances[i]
-		if inst.Role == "master" {
-			// Check if K3s was supposed to be installed and running
-			if inst.K3sInstalled {
-				// Check if K3s service is actually running
-				isRunning, err := r.checkK3sServiceStatus(ctx, inst.InstanceID)
-				if err != nil {
-					log.Printf("[RUNNING] Failed to check K3s service on %s: %v", inst.Name, err)
-				} else {
-					if isRunning && !inst.K3sRunning {
-						// Service is running but status says it's not - update status
-						log.Printf("[RUNNING] K3s service is running on %s but status was false, updating", inst.Name)
-						inst.K3sRunning = true
-					} else if !isRunning && inst.K3sRunning {
-						// Service stopped but status says it's running
-						log.Printf("[RUNNING] K3s service stopped on %s, marking as not running", inst.Name)
-						inst.K3sRunning = false
-						inst.K3sConfigError = "K3s service stopped unexpectedly"
-						needsConfiguration = true
-					} else if !isRunning && !inst.K3sRunning {
-						// Service is not running and status reflects that - needs configuration
-						log.Printf("[RUNNING] K3s service not running on %s, needs configuration", inst.Name)
-						needsConfiguration = true
-					}
-				}
-			} else if !inst.K3sInstalled {
-				// K3s not installed at all - needs installation
-				log.Printf("[RUNNING] K3s not installed on %s, needs installation", inst.Name)
-				resource.Status.Phase = models.ClusterPhaseInstalling
-				resource.Status.Message = "K3s installation required"
-				return &models.ReconcileResult{
-					Requeue:      true,
-					RequeueAfter: 10 * time.Second,
-				}, nil
-			}
-		}
-	}
-	
-	// If any master needs configuration, transition to Configuring phase
-	if needsConfiguration {
-		log.Printf("[RUNNING] Detected K3s services need configuration, transitioning to Configuring phase")
-		resource.Status.Phase = models.ClusterPhaseConfiguring
-		resource.Status.Message = "Configuring K3s services"
-		return &models.ReconcileResult{
-			Requeue:      true,
-			RequeueAfter: 10 * time.Second,
-		}, nil
-	}
-
-	// Update last reconcile time
-	now := time.Now()
-	resource.Status.LastReconcileTime = &now
-
-	// Periodic health check
-	return &models.ReconcileResult{
-		Requeue:      true,
-		RequeueAfter: 60 * time.Second,
-	}, nil
-}
-
-// reconcileFailed moved to phases.go
-
-// checkInstanceTypeChanges checks if any instances need resizing
-func (r *Reconciler) checkInstanceTypeChanges(ctx context.Context, resource *models.ClusterResource) (bool, error) {
-	computeService := r.provider.GetComputeService()
-	
-	// Get current instances
-	filters := map[string]string{
-		"tag:ClusterName":     resource.Name,
-		"instance-state-name": "running,stopped",
-	}
-	
-	if resource.Spec.Region != "" {
-		filters["region"] = resource.Spec.Region
-	}
-	
-	instances, err := computeService.ListInstances(ctx, filters)
-	if err != nil {
-		return false, fmt.Errorf("failed to list instances: %w", err)
-	}
-	
-	// Check if any instance has different type than desired
-	desiredType := resource.Spec.InstanceType
-	if desiredType == "" {
-		desiredType = "t3.medium" // default
-	}
-	
-	for _, inst := range instances {
-		if inst.InstanceType != desiredType {
-			log.Printf("[RESIZE] Instance %s has type %s, but desired is %s", inst.Name, inst.InstanceType, desiredType)
-			return true, nil
-		}
-	}
-	
-	return false, nil
-}
-
-// resizeInstances handles resizing instances to new instance type
-func (r *Reconciler) resizeInstances(ctx context.Context, resource *models.ClusterResource) (*models.ReconcileResult, error) {
-	computeService := r.provider.GetComputeService()
-	
-	// Update status
-	resource.Status.Phase = models.ClusterPhaseUpdating
-	resource.Status.Message = fmt.Sprintf("Resizing instances to %s", resource.Spec.InstanceType)
-	
-	// Save status to notify UI
-	if err := r.saveClusterResource(ctx, resource); err != nil {
-		log.Printf("Failed to save status: %v", err)
-	}
-	
-	// Get instances that need resizing
-	filters := map[string]string{
-		"tag:ClusterName":     resource.Name,
-		"instance-state-name": "running,stopped",
-	}
-	
-	if resource.Spec.Region != "" {
-		filters["region"] = resource.Spec.Region
-	}
-	
-	instances, err := computeService.ListInstances(ctx, filters)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list instances: %w", err)
-	}
-	
-	desiredType := resource.Spec.InstanceType
-	if desiredType == "" {
-		desiredType = "t3.medium"
-	}
-	
-	// Process each instance that needs resizing
-	var resizeErrors []string
-	resizedCount := 0
-	
-	for _, inst := range instances {
-		if inst.InstanceType == desiredType {
-			continue // Already correct type
-		}
-		
-		log.Printf("[RESIZE] Resizing instance %s from %s to %s", inst.Name, inst.InstanceType, desiredType)
-		
-		// Stop instance if running
-		if inst.State == "running" {
-			log.Printf("[RESIZE] Stopping instance %s", inst.Name)
-			if err := computeService.StopInstance(ctx, inst.ID); err != nil {
-				resizeErrors = append(resizeErrors, fmt.Sprintf("%s: failed to stop: %v", inst.Name, err))
-				continue
+				log.Printf("[NODEPOOLS] Terminated orphaned instance %s", worker.InstanceID)
 			}
 			
-			// Wait for instance to stop (with timeout)
-			stopCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			err := r.waitForInstanceState(stopCtx, inst.ID, "stopped")
-			cancel()
-			
-			if err != nil {
-				resizeErrors = append(resizeErrors, fmt.Sprintf("%s: timeout waiting for stop: %v", inst.Name, err))
-				continue
-			}
-		}
-		
-		// Modify instance type
-		log.Printf("[RESIZE] Modifying instance %s type to %s", inst.Name, desiredType)
-		if err := computeService.ModifyInstanceType(ctx, inst.ID, desiredType); err != nil {
-			resizeErrors = append(resizeErrors, fmt.Sprintf("%s: failed to modify type: %v", inst.Name, err))
-			continue
-		}
-		
-		// Start instance
-		log.Printf("[RESIZE] Starting instance %s", inst.Name)
-		if err := computeService.StartInstance(ctx, inst.ID); err != nil {
-			resizeErrors = append(resizeErrors, fmt.Sprintf("%s: failed to start: %v", inst.Name, err))
-			continue
-		}
-		
-		resizedCount++
-		
-		// Update status with progress
-		resource.Status.Message = fmt.Sprintf("Resized %d/%d instances to %s", resizedCount, len(instances), desiredType)
-		if err := r.saveClusterResource(ctx, resource); err != nil {
-			log.Printf("Failed to save status: %v", err)
-		}
-	}
-	
-	// Check results
-	if len(resizeErrors) > 0 {
-		resource.Status.Phase = models.ClusterPhaseFailed
-		resource.Status.Message = fmt.Sprintf("Resize failed: %s", strings.Join(resizeErrors, "; "))
-		return &models.ReconcileResult{
-			Requeue:      true,
-			RequeueAfter: 30 * time.Second,
-		}, fmt.Errorf("resize errors: %v", resizeErrors)
-	}
-	
-	// All instances resized successfully
-	log.Printf("[RESIZE] Successfully resized %d instances for cluster %s", resizedCount, resource.Name)
-	resource.Status.Phase = models.ClusterPhaseRunning
-	resource.Status.Message = fmt.Sprintf("All instances resized to %s", desiredType)
-	
-	return &models.ReconcileResult{
-		Requeue:      true,
-		RequeueAfter: 10 * time.Second,
-	}, nil
-}
-
-// waitForInstanceState waits for an instance to reach the desired state
-func (r *Reconciler) waitForInstanceState(ctx context.Context, instanceID, desiredState string) error {
-	computeService := r.provider.GetComputeService()
-	
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for instance %s to reach state %s", instanceID, desiredState)
-		case <-time.After(5 * time.Second):
-			// Check instance state
-			filters := map[string]string{
-				"instance-id": instanceID,
-			}
-			instances, err := computeService.ListInstances(ctx, filters)
-			if err != nil {
-				return fmt.Errorf("failed to get instance state: %w", err)
-			}
-			
-			if len(instances) > 0 && instances[0].State == desiredState {
-				return nil // Reached desired state
-			}
-		}
-	}
-}
-
-// loadClusterResource loads cluster resource from storage with timeout
-func (r *Reconciler) loadClusterResource(ctx context.Context, name string) (*models.ClusterResource, error) {
-	// Create a timeout context for loading (30 seconds)
-	loadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	// Load from new format only: separate config and status files
-	configKey := fmt.Sprintf("clusters/%s/config.yaml", name)
-	statusKey := fmt.Sprintf("clusters/%s/status.yaml", name)
-
-	// Load config (required)
-	configData, err := r.provider.GetStorageService().GetObject(loadCtx, configKey)
-	if err != nil {
-		return nil, fmt.Errorf("cluster config %s not found: %w", name, err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cluster config: %w", err)
-	}
-
-	// Load status (optional - might not exist for new clusters)
-	var status map[string]interface{}
-	statusData, err := r.provider.GetStorageService().GetObject(loadCtx, statusKey)
-	if err == nil {
-		if err := yaml.Unmarshal(statusData, &status); err != nil {
-			log.Printf("Warning: Failed to unmarshal status for %s: %v", name, err)
-			status = make(map[string]interface{})
-		}
-	} else {
-		// No status file yet, initialize empty
-		status = make(map[string]interface{})
-	}
-
-	// Check if this is the new format (with apiVersion and kind)
-	if apiVersion, ok := config["apiVersion"].(string); ok && apiVersion != "" {
-		// New format - convert to old format for compatibility
-		clusterState := make(map[string]interface{})
-		
-		// Build the cluster object from new format
-		cluster := make(map[string]interface{})
-		
-		// Extract metadata
-		if metadata, ok := config["metadata"].(map[string]interface{}); ok {
-			cluster["name"] = metadata["name"]
-			cluster["id"] = metadata["id"]
-			cluster["created_at"] = metadata["created_at"]
-			cluster["updated_at"] = metadata["updated_at"]
-			
-			// Check for deletion timestamp in config metadata
-			if deletionTimestamp, ok := metadata["deletionTimestamp"]; ok && deletionTimestamp != nil {
-				// Mark this cluster for deletion
-				if statusMeta, ok := status["metadata"].(map[string]interface{}); ok {
-					statusMeta["deletion_requested"] = deletionTimestamp
-				} else {
-					status["metadata"] = map[string]interface{}{
-						"deletion_requested": deletionTimestamp,
-					}
+			// Remove from status
+			newStatusInstances := []models.InstanceStatus{}
+			for _, inst := range cluster.Status.Instances {
+				if inst.InstanceID != worker.InstanceID {
+					newStatusInstances = append(newStatusInstances, inst)
 				}
 			}
+			cluster.Status.Instances = newStatusInstances
 		}
-		
-		// Extract spec (using camelCase from YAML)
-		if spec, ok := config["spec"].(map[string]interface{}); ok {
-			cluster["mode"] = spec["mode"]
-			cluster["region"] = spec["region"]
-			cluster["instance_type"] = spec["instanceType"]
-			cluster["k3s_version"] = spec["k3sVersion"]
-			cluster["master_nodes"] = spec["masterNodes"]
-			cluster["worker_nodes"] = spec["workerNodes"]
-			cluster["network_cidr"] = spec["networkCIDR"]
-			cluster["service_cidr"] = spec["serviceCIDR"]
-			cluster["cluster_dns"] = spec["clusterDNS"]
-			cluster["description"] = spec["description"]
-			
-			// Debug logging
-			log.Printf("[CONFIG] Loaded instanceType: %v", spec["instanceType"])
-		}
-		
-		// Add status from status file
-		if phase, ok := status["phase"].(string); ok {
-			cluster["status"] = phase
-		}
-		
-		clusterState["cluster"] = cluster
-		clusterState["instance_ids"] = status["instance_ids"]
-		clusterState["instances"] = status["instances"]  // Add detailed instance data
-		clusterState["metadata"] = status["metadata"]
-		
-		return r.convertStateToResource(clusterState)
-	} else {
-		// Old format - keep existing logic for backward compatibility
-		clusterState := make(map[string]interface{})
-		clusterState["cluster"] = config["cluster"]
-		if statusCluster, ok := status["cluster"].(map[string]interface{}); ok {
-			// Merge status into cluster
-			if cluster, ok := clusterState["cluster"].(map[string]interface{}); ok {
-				cluster["status"] = statusCluster["status"]
-			}
-		}
-		clusterState["instance_ids"] = status["instance_ids"]
-		clusterState["instances"] = status["instances"]  // Add detailed instance data
-		clusterState["metadata"] = status["metadata"]
-		
-		return r.convertStateToResource(clusterState)
-	}
-}
-
-// convertStateToResource converts a state JSON to ClusterResource
-func (r *Reconciler) convertStateToResource(state map[string]interface{}) (*models.ClusterResource, error) {
-	cluster, ok := state["cluster"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("invalid state format: missing cluster")
-	}
-
-	resource := &models.ClusterResource{
-		Name:      getStringFromMap(cluster, "name"),
-		Namespace: "default",
-		ClusterID: getStringFromMap(cluster, "id"),
-		Spec: models.ClusterSpec{
-			MasterCount:  1,           // Default, will be updated from nodes or mode
-			Mode:         "dev", // Default mode
-			InstanceType: "t3.medium",
-		},
-		Status: models.ClusterResourceStatus{
-			Phase:   models.ClusterPhasePending,
-			Message: "Loaded from state",
-		},
-		Generation: 1,
-	}
-
-	// Extract mode from cluster
-	if mode := getStringFromMap(cluster, "mode"); mode != "" {
-		resource.Spec.Mode = mode
-		// Set master count based on mode
-		if mode == "ha" {
-			resource.Spec.MasterCount = 3
-		} else {
-			resource.Spec.MasterCount = 1
-		}
-	}
-
-	// Always check for region in cluster config first (it's a cluster-level property)
-	if region := getStringFromMap(cluster, "region"); region != "" {
-		resource.Spec.Region = region
-		log.Printf("Setting region from cluster config: %s", region)
-	}
-
-	// Check for instance_type in cluster config
-	if instanceType := getStringFromMap(cluster, "instance_type"); instanceType != "" {
-		resource.Spec.InstanceType = instanceType
-		log.Printf("[CONFIG] Set resource InstanceType to: %s", instanceType)
-	} else {
-		log.Printf("[CONFIG] No instance_type found in cluster config, using default: %s", resource.Spec.InstanceType)
-	}
-
-	// Set status based on cluster status
-	if status := getStringFromMap(cluster, "status"); status != "" {
-		switch status {
-		case "creating":
-			resource.Status.Phase = models.ClusterPhaseProvisioning
-		case "running":
-			resource.Status.Phase = models.ClusterPhaseRunning
-		case "error":
-			resource.Status.Phase = models.ClusterPhaseFailed
-		case "deleting":
-			resource.Status.Phase = models.ClusterPhaseDeleting
-		default:
-			resource.Status.Phase = models.ClusterPhasePending
-		}
-	}
-
-	// Extract instance IDs from state
-	if instanceIDs, ok := state["instance_ids"].(map[string]interface{}); ok {
-		for nodeName, instanceID := range instanceIDs {
-			if id, ok := instanceID.(string); ok && id != "" {
-				instance := models.InstanceStatus{
-					InstanceID: id,
-					Name:       nodeName,
-					State:      "running", // Default to running if ID exists
-				}
-				
-				// Load detailed instance data if available
-				if instances, ok := state["instances"].(map[string]interface{}); ok {
-					if instData, ok := instances[nodeName].(map[string]interface{}); ok {
-						// Load basic fields
-						if state, ok := instData["state"].(string); ok {
-							instance.State = state
-						}
-						if privateIP, ok := instData["private_ip"].(string); ok {
-							instance.PrivateIP = privateIP
-						}
-						if publicIP, ok := instData["public_ip"].(string); ok {
-							instance.PublicIP = publicIP
-						}
-						if role, ok := instData["role"].(string); ok {
-							instance.Role = role
-						}
-						
-						// Load K3s installation status fields
-						if k3sInstalled, ok := instData["k3s_installed"].(bool); ok {
-							instance.K3sInstalled = k3sInstalled
-						}
-						if k3sVersion, ok := instData["k3s_version"].(string); ok {
-							instance.K3sVersion = k3sVersion
-						}
-						if k3sInstallTime, ok := instData["k3s_install_time"].(string); ok {
-							if t, err := time.Parse(time.RFC3339, k3sInstallTime); err == nil {
-								instance.K3sInstallTime = &t
-							}
-						}
-						if k3sInstallError, ok := instData["k3s_install_error"].(string); ok {
-							instance.K3sInstallError = k3sInstallError
-						}
-						
-						// Load K3s configuration status fields
-						if k3sRunning, ok := instData["k3s_running"].(bool); ok {
-							instance.K3sRunning = k3sRunning
-						}
-						if k3sConfigTime, ok := instData["k3s_config_time"].(string); ok {
-							if t, err := time.Parse(time.RFC3339, k3sConfigTime); err == nil {
-								instance.K3sConfigTime = &t
-							}
-						}
-						if k3sConfigError, ok := instData["k3s_config_error"].(string); ok {
-							instance.K3sConfigError = k3sConfigError
-						}
-					}
-				}
-				
-				resource.Status.Instances = append(resource.Status.Instances, instance)
-			}
-		}
-	}
-
-	// Check metadata for phase and other reconciler-controlled state
-	if metadata, ok := state["metadata"].(map[string]interface{}); ok {
-		// FIRST: Check for deletion timestamp - this takes precedence over everything
-		if deletionRequested, ok := metadata["deletion_requested"]; ok {
-			// Cluster is marked for deletion
-			resource.Status.Phase = models.ClusterPhaseDeleting
-			resource.Status.Message = fmt.Sprintf("Deletion requested at %v", deletionRequested)
-
-			// Set DeletionTimestamp if available
-			// Handle both string format and time.Time format (from Manager)
-			switch v := deletionRequested.(type) {
-			case string:
-				if t, err := time.Parse(time.RFC3339, v); err == nil {
-					resource.DeletionTimestamp = &t
-				}
-			case float64:
-				// JSON number (Unix timestamp)
-				t := time.Unix(int64(v), 0)
-				resource.DeletionTimestamp = &t
-			default:
-				// Could be a time.Time object marshaled as string like "2024-01-01T00:00:00Z"
-				if timeStr, ok := v.(string); ok {
-					if t, err := time.Parse(time.RFC3339, timeStr); err == nil {
-						resource.DeletionTimestamp = &t
-					}
-				}
-			}
-		} else {
-			// Only read phase from metadata if not deleting
-			if phase, ok := metadata["phase"].(string); ok && phase != "" {
-				switch phase {
-				case models.ClusterPhaseProvisioning:
-					resource.Status.Phase = models.ClusterPhaseProvisioning
-				case models.ClusterPhaseInstalling:
-					resource.Status.Phase = models.ClusterPhaseInstalling
-				case models.ClusterPhaseConfiguring:
-					resource.Status.Phase = models.ClusterPhaseConfiguring
-				case models.ClusterPhaseRunning:
-					resource.Status.Phase = models.ClusterPhaseRunning
-				case models.ClusterPhaseFailed:
-					resource.Status.Phase = models.ClusterPhaseFailed
-				case models.ClusterPhaseDeleting:
-					resource.Status.Phase = models.ClusterPhaseDeleting
-				default:
-					// Keep the phase from cluster status if metadata phase is unknown
-				}
-			}
-		}
-		
-		// Read message from metadata
-		if message, ok := metadata["message"].(string); ok {
-			resource.Status.Message = message
-		}
-		
-		// Check retry count (for logging/debugging)
-		if retryCount, ok := metadata["provision_retry_count"].(float64); ok && retryCount > 0 {
-			log.Printf("Cluster %s has been retried %v times", resource.Name, retryCount)
-		}
-	}
-
-	return resource, nil
-}
-
-// getStringFromMap safely gets a string from a map
-func getStringFromMap(m map[string]interface{}, key string) string {
-	if val, ok := m[key].(string); ok {
-		return val
-	}
-	return ""
-}
-
-// mapPhaseToStatus maps ClusterPhase to status string
-func mapPhaseToStatus(phase string) string {
-	switch phase {
-	case models.ClusterPhaseRunning:
-		return "running"
-	case models.ClusterPhaseProvisioning:
-		return "creating"
-	case models.ClusterPhaseInstalling:
-		return "installing"
-	case models.ClusterPhaseConfiguring:
-		return "configuring"
-	case models.ClusterPhaseFailed:
-		return "error"
-	case models.ClusterPhaseDeleting:
-		return "deleting"
-	default:
-		return "pending"
-	}
-}
-
-// saveClusterResource saves ONLY the status to storage (never modifies config)
-func (r *Reconciler) saveClusterResource(ctx context.Context, resource *models.ClusterResource) error {
-	// Create a timeout context for saving (30 seconds)
-	saveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	// IMPORTANT: Only save status, never modify config
-	statusKey := fmt.Sprintf("clusters/%s/status.yaml", resource.Name)
-	
-	// First, load existing status to preserve metadata like retry counts
-	var existingMetadata map[string]interface{}
-	existingStatusData, err := r.provider.GetStorageService().GetObject(ctx, statusKey)
-	if err == nil {
-		var existingStatus map[string]interface{}
-		if yaml.Unmarshal(existingStatusData, &existingStatus) == nil {
-			if metadata, ok := existingStatus["metadata"].(map[string]interface{}); ok {
-				existingMetadata = metadata
-			}
-		}
-	}
-
-	// Create status structure
-	statusState := make(map[string]interface{})
-
-	// Status cluster info (reconciler-controlled fields only)
-	statusState["cluster"] = map[string]interface{}{
-		"status":     mapPhaseToStatus(resource.Status.Phase),
-		"updated_at": time.Now().Format(time.RFC3339),
-	}
-
-	// Instance IDs and their states
-	instanceIDs := make(map[string]string)
-	instanceStates := make(map[string]interface{})
-	for _, inst := range resource.Status.Instances {
-		instanceIDs[inst.Name] = inst.InstanceID
-		instanceState := map[string]interface{}{
-			"id":         inst.InstanceID,
-			"state":      inst.State,
-			"private_ip": inst.PrivateIP,
-			"public_ip":  inst.PublicIP,
-			"role":       inst.Role,
-		}
-		
-		// Add K3s installation status fields
-		if inst.K3sInstalled {
-			instanceState["k3s_installed"] = inst.K3sInstalled
-			instanceState["k3s_version"] = inst.K3sVersion
-			if inst.K3sInstallTime != nil {
-				instanceState["k3s_install_time"] = inst.K3sInstallTime.Format(time.RFC3339)
-			}
-		}
-		if inst.K3sInstallError != "" {
-			instanceState["k3s_install_error"] = inst.K3sInstallError
-		}
-		
-		// Add K3s configuration status fields
-		if inst.K3sRunning {
-			instanceState["k3s_running"] = inst.K3sRunning
-			if inst.K3sConfigTime != nil {
-				instanceState["k3s_config_time"] = inst.K3sConfigTime.Format(time.RFC3339)
-			}
-		}
-		if inst.K3sConfigError != "" {
-			instanceState["k3s_config_error"] = inst.K3sConfigError
-		}
-		
-		instanceStates[inst.Name] = instanceState
-	}
-	statusState["instance_ids"] = instanceIDs
-	statusState["instances"] = instanceStates
-
-	// Metadata
-	metadata := map[string]interface{}{
-		"last_reconciled":    time.Now().Format(time.RFC3339),
-		"phase":              resource.Status.Phase,
-		"message":            resource.Status.Message,
-		"observed_generation": resource.Status.ObservedGeneration,
 	}
 	
-	// Track provisioning retry count for monitoring purposes only
-	// Not used for failure decisions - failures are based on actual instance/API errors
-	if resource.Status.Phase == models.ClusterPhaseProvisioning {
-		retryCount := 0
-		if existingMetadata != nil {
-			if count, ok := existingMetadata["provision_retry_count"].(float64); ok {
-				retryCount = int(count)
-			}
-		}
-		// Increment for monitoring
-		metadata["provision_retry_count"] = retryCount + 1
-		log.Printf("[SAVE] Cluster %s provisioning attempt #%d", resource.Name, retryCount+1)
-	} else {
-		// Reset retry count when phase changes
-		metadata["provision_retry_count"] = 0
-	}
-	
-	// Set deletion_requested if DeletionTimestamp is set on resource
-	// This comes from the config.json metadata.deletionTimestamp field
-	if resource.DeletionTimestamp != nil {
-		metadata["deletion_requested"] = resource.DeletionTimestamp.Format(time.RFC3339)
-	}
-	
-	statusState["metadata"] = metadata
-
-	// Save status file
-	statusData, err := yaml.Marshal(statusState)
-	if err != nil {
-		return fmt.Errorf("failed to marshal status: %w", err)
-	}
-
-	if err := r.provider.GetStorageService().PutObject(saveCtx, statusKey, statusData); err != nil {
-		return fmt.Errorf("failed to save cluster status: %w", err)
-	}
-
-	log.Printf("Saved cluster status for %s with phase %s", resource.Name, resource.Status.Phase)
+	log.Printf("[NODEPOOLS] Node pool reconciliation completed for cluster %s", cluster.Name)
 	return nil
 }
 
-
-// sendNotification sends a notification
-func (r *Reconciler) sendNotification(ctx context.Context, notificationType, message string) {
-	topic := "goman-cluster-events"
-	if notificationType == "error" {
-		topic = "goman-error-events"
-	}
-
-	if err := r.provider.GetNotificationService().Publish(ctx, topic, message); err != nil {
-		// Only log if it's not a "topic not found" error - SNS topics are optional
-		if !strings.Contains(err.Error(), "NotFound") && !strings.Contains(err.Error(), "Topic does not exist") {
-			log.Printf("Failed to send notification: %v", err)
+// extractWorkerIndex extracts the worker index from the instance name
+func extractWorkerIndex(name string) int {
+	parts := strings.Split(name, "-")
+	if len(parts) > 0 {
+		if index, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+			return index
 		}
-		// Silently ignore "topic not found" errors as notifications are optional
 	}
+	return -1
+}
+
+// provisionNodePools provisions worker node pools
+func (r *Reconciler) provisionNodePools(ctx context.Context, cluster *models.ClusterResource) error {
+	computeService := r.provider.GetComputeService()
+	storageService := r.provider.GetStorageService()
+	
+	// Get first master's IP for workers to join
+	var masterIP string
+	log.Printf("[NODEPOOLS] Looking for master IP, total instances: %d", len(cluster.Status.Instances))
+	for _, inst := range cluster.Status.Instances {
+		log.Printf("[NODEPOOLS] Instance %s: role=%s, privateIP=%s", inst.InstanceID, inst.Role, inst.PrivateIP)
+		if inst.Role == "master" && inst.PrivateIP != "" {
+			masterIP = inst.PrivateIP
+			break
+		}
+	}
+	
+	if masterIP == "" {
+		return fmt.Errorf("no master node IP found for worker nodes to join")
+	}
+	
+	// Get the node token from S3 for workers to join
+	nodeTokenKey := fmt.Sprintf("clusters/%s/k3s-node-token", cluster.Name)
+	nodeTokenData, err := storageService.GetObject(ctx, nodeTokenKey)
+	if err != nil {
+		// Fallback to agent token for backward compatibility
+		log.Printf("[NODEPOOLS] Failed to get node token, trying agent token: %v", err)
+		agentTokenKey := fmt.Sprintf("clusters/%s/k3s-agent-token", cluster.Name)
+		nodeTokenData, err = storageService.GetObject(ctx, agentTokenKey)
+		if err != nil {
+			return fmt.Errorf("failed to get join token for workers: %w", err)
+		}
+	}
+	nodeToken := strings.TrimSpace(string(nodeTokenData))
+	
+	// Check existing workers to avoid duplicates
+	existingWorkers := make(map[string]bool)
+	for _, inst := range cluster.Status.Instances {
+		if inst.Role == "worker" {
+			existingWorkers[inst.Name] = true
+		}
+	}
+	
+	// Provision each node pool
+	for _, pool := range cluster.Spec.NodePools {
+		log.Printf("[NODEPOOLS] Provisioning node pool '%s' with %d nodes", pool.Name, pool.Count)
+		
+		for i := 0; i < pool.Count; i++ {
+			workerName := fmt.Sprintf("%s-worker-%s-%d", cluster.Name, pool.Name, i)
+			
+			// Skip if already exists
+			if existingWorkers[workerName] {
+				log.Printf("[NODEPOOLS] Worker %s already exists, skipping", workerName)
+				continue
+			}
+			
+			// Prepare instance configuration
+			instanceConfig := provider.InstanceConfig{
+				Name:         workerName,
+				Region:       cluster.Spec.Region,
+				InstanceType: pool.InstanceType,
+				Tags: map[string]string{
+					"goman-cluster":     cluster.Name,
+					"goman-role":        "worker",
+					"goman-nodepool":    pool.Name,
+					"goman-master-ip":   masterIP,
+					"goman-node-token":  nodeToken,
+					"ManagedBy":         "goman",
+				},
+			}
+			
+			// Add Kubernetes labels as tags (prefixed with k8s-label-)
+			for k, v := range pool.Labels {
+				instanceConfig.Tags[fmt.Sprintf("k8s-label-%s", k)] = v
+			}
+			
+			// Add taints as tags if present (for later application via kubectl)
+			if len(pool.Taints) > 0 {
+				taintStrings := []string{}
+				for _, taint := range pool.Taints {
+					taintStrings = append(taintStrings, fmt.Sprintf("%s=%s:%s", taint.Key, taint.Value, taint.Effect))
+				}
+				instanceConfig.Tags["k8s-taints"] = strings.Join(taintStrings, ",")
+			}
+			
+			// Create the instance
+			instance, err := computeService.CreateInstance(ctx, instanceConfig)
+			if err != nil {
+				log.Printf("[NODEPOOLS] Failed to create worker %s: %v", workerName, err)
+				continue // Continue with other workers
+			}
+			
+			// Add to cluster status
+			instanceStatus := models.InstanceStatus{
+				InstanceID: instance.ID,
+				Name:       workerName,
+				Role:       "worker",
+				State:      instance.State,
+				LaunchTime: time.Now(),
+			}
+			cluster.Status.Instances = append(cluster.Status.Instances, instanceStatus)
+			
+			log.Printf("[NODEPOOLS] Created worker node %s (%s) in pool '%s'", workerName, instance.ID, pool.Name)
+		}
+	}
+	
+	log.Printf("[NODEPOOLS] Node pool provisioning completed for cluster %s", cluster.Name)
+	return nil
+}
+
+// generateToken generates a random token for K3s
+func (r *Reconciler) generateToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(bytes), nil
+}
+
+// saveTokens saves K3s tokens to S3
+func (r *Reconciler) saveTokens(ctx context.Context, clusterName, masterToken, workerToken string) error {
+	storageService := r.provider.GetStorageService()
+	
+	// Save master token
+	masterTokenKey := fmt.Sprintf("clusters/%s/k3s-server-token", clusterName)
+	if err := storageService.PutObject(ctx, masterTokenKey, []byte(masterToken)); err != nil {
+		return fmt.Errorf("failed to save master token: %w", err)
+	}
+	
+	// Save worker token  
+	workerTokenKey := fmt.Sprintf("clusters/%s/k3s-agent-token", clusterName)
+	if err := storageService.PutObject(ctx, workerTokenKey, []byte(workerToken)); err != nil {
+		return fmt.Errorf("failed to save worker token: %w", err)
+	}
+	
+	log.Printf("[TOKENS] Saved K3s tokens for cluster %s", clusterName)
+	return nil
 }

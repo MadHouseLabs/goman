@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-lambda-go/lambdacontext"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -104,6 +105,12 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage) (*models.ReconcileResult, error) {
 	log.Printf("Received event: %s", string(event))
 
+	// Get Lambda request ID from context
+	requestID := "unknown"
+	if lc, ok := lambdacontext.FromContext(ctx); ok {
+		requestID = lc.AwsRequestID
+	}
+
 	// Store the cluster name for requeue if needed
 	var clusterName string
 	var result *models.ReconcileResult
@@ -115,7 +122,7 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 		var lambdaEvent LambdaEvent
 		if err := json.Unmarshal(event, &lambdaEvent); err == nil && lambdaEvent.ClusterName != "" {
 			clusterName = lambdaEvent.ClusterName
-			result, err = h.reconciler.ReconcileCluster(ctx, clusterName)
+			result, err = h.reconciler.ReconcileClusterWithRequestID(ctx, clusterName, requestID)
 			goto handleRequeue
 		}
 
@@ -128,7 +135,7 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 				if err := json.Unmarshal([]byte(record.Body), &requeueMsg); err == nil && requeueMsg.ClusterName != "" {
 					log.Printf("Processing SQS requeue event for cluster: %s", requeueMsg.ClusterName)
 					clusterName = requeueMsg.ClusterName
-					result, err = h.reconciler.ReconcileCluster(ctx, clusterName)
+					result, err = h.reconciler.ReconcileClusterWithRequestID(ctx, clusterName, requestID)
 					goto handleRequeue
 				}
 			}
@@ -142,7 +149,7 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 					clusterName = extractClusterName(record.S3.Object.Key)
 					if clusterName != "" {
 						log.Printf("Processing S3 event for cluster: %s", clusterName)
-						result, err = h.reconciler.ReconcileCluster(ctx, clusterName)
+						result, err = h.reconciler.ReconcileClusterWithRequestID(ctx, clusterName, requestID)
 						goto handleRequeue
 					}
 				}
@@ -171,7 +178,7 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, event json.RawMessage
 
 			log.Printf("Instance %s belongs to cluster %s (state: %s), triggering reconciliation",
 				instanceID, clusterName, state)
-			result, err = h.reconciler.ReconcileCluster(ctx, clusterName)
+			result, err = h.reconciler.ReconcileClusterWithRequestID(ctx, clusterName, requestID)
 			goto handleRequeue
 		}
 

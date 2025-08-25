@@ -166,6 +166,100 @@ func (p *AWSProvider) GetAccountID() string {
 	return p.accountID
 }
 
+// GetServiceName returns AWS-specific service name for generic service type
+func (p *AWSProvider) GetServiceName(serviceType provider.ServiceType) string {
+	switch serviceType {
+	case provider.ServiceTypeCompute:
+		return "EC2"
+	case provider.ServiceTypeStorage:
+		return "S3"
+	case provider.ServiceTypeCommand:
+		return "SSM"
+	case provider.ServiceTypeLock:
+		return "DynamoDB"
+	case provider.ServiceTypeFunction:
+		return "Lambda"
+	case provider.ServiceTypeNotification:
+		return "SQS"
+	default:
+		return string(serviceType)
+	}
+}
+
+// GetProviderConfig returns AWS-specific provider configuration
+func (p *AWSProvider) GetProviderConfig() provider.ProviderConfig {
+	return provider.ProviderConfig{
+		DefaultInstanceType: "t3.medium",
+		DefaultRegion:      "ap-south-1",
+		DefaultTopics: map[string]string{
+			"reconciliation": "goman-reconcile-queue",
+			"notifications": "goman-notifications",
+		},
+		ServiceNames: map[provider.ServiceType]string{
+			provider.ServiceTypeCompute:      "EC2",
+			provider.ServiceTypeStorage:      "S3", 
+			provider.ServiceTypeCommand:      "SSM",
+			provider.ServiceTypeLock:         "DynamoDB",
+			provider.ServiceTypeFunction:     "Lambda",
+			provider.ServiceTypeNotification: "SQS",
+		},
+		CustomSettings: map[string]interface{}{
+			"amiID": "ami-0ad21ae1d0696ad58", // Ubuntu 20.04 LTS in ap-south-1
+			"keyPrefix": "goman",
+			"vpcID": "",
+		},
+	}
+}
+
+// GetServiceConfiguration returns service-specific configuration for AWS
+func (p *AWSProvider) GetServiceConfiguration(serviceType provider.ServiceType) provider.ServiceConfiguration {
+	// Use the default configurations but allow AWS-specific overrides
+	config := provider.DefaultServiceConfiguration(serviceType)
+	
+	// AWS-specific overrides
+	switch serviceType {
+	case provider.ServiceTypeCompute:
+		config.ProviderSpecific = map[string]interface{}{
+			"instanceProfile": "GoManInstanceProfile",
+			"userData": "",
+			"enableDetailedMonitoring": false,
+		}
+	case provider.ServiceTypeStorage:
+		config.ProviderSpecific = map[string]interface{}{
+			"bucketPrefix": "goman",
+			"versioning": true,
+			"encryption": "AES256",
+		}
+	case provider.ServiceTypeCommand:
+		config.ProviderSpecific = map[string]interface{}{
+			"documentName": "AWS-RunShellScript",
+			"outputS3BucketName": "",
+			"outputS3KeyPrefix": "ssm-output",
+		}
+	case provider.ServiceTypeLock:
+		config.ProviderSpecific = map[string]interface{}{
+			"tableName": "goman-resource-locks",
+			"billingMode": "PAY_PER_REQUEST",
+			"enablePointInTimeRecovery": true,
+		}
+	case provider.ServiceTypeFunction:
+		config.ProviderSpecific = map[string]interface{}{
+			"runtime": "provided.al2",
+			"architecture": "x86_64",
+			"timeout": 300,
+			"memorySize": 512,
+		}
+	case provider.ServiceTypeNotification:
+		config.ProviderSpecific = map[string]interface{}{
+			"visibilityTimeoutSeconds": 300,
+			"messageRetentionPeriod": 1209600, // 14 days
+			"receiveMessageWaitTimeSeconds": 20, // long polling
+		}
+	}
+	
+	return config
+}
+
 // GetEC2Client returns the EC2 client for direct AWS operations
 func (p *AWSProvider) GetEC2Client() *ec2.Client {
 	return p.ec2Client

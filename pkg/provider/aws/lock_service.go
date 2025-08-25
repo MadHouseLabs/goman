@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
+	"github.com/madhouselabs/goman/pkg/provider"
 )
 
 const (
@@ -32,6 +33,11 @@ type LockItem struct {
 	Token      string `dynamodbav:"token"`
 	ExpiresAt  int64  `dynamodbav:"expires_at"` // Unix timestamp for TTL
 	CreatedAt  string `dynamodbav:"created_at"`
+	// Metadata fields
+	Phase     string `dynamodbav:"phase,omitempty"`
+	Step      string `dynamodbav:"step,omitempty"`
+	RequestID string `dynamodbav:"request_id,omitempty"`
+	StartedAt string `dynamodbav:"started_at,omitempty"`
 }
 
 // NewLockService creates a new DynamoDB-based lock service
@@ -141,6 +147,61 @@ func (s *LockService) AcquireLock(ctx context.Context, resourceID string, owner 
 	return token, nil
 }
 
+// AcquireLockWithMetadata tries to acquire a lock with additional metadata
+func (s *LockService) AcquireLockWithMetadata(ctx context.Context, resourceID string, owner string, ttl time.Duration, metadata *provider.LockMetadata) (string, error) {
+	token := uuid.New().String()
+	expiresAt := time.Now().Add(ttl).Unix()
+
+	item := LockItem{
+		ResourceID: resourceID,
+		Owner:      owner,
+		Token:      token,
+		ExpiresAt:  expiresAt,
+		CreatedAt:  time.Now().Format(time.RFC3339),
+	}
+
+	// Add metadata if provided
+	if metadata != nil {
+		item.Phase = metadata.Phase
+		item.Step = metadata.Step
+		item.RequestID = metadata.RequestID
+		item.StartedAt = metadata.StartedAt.Format(time.RFC3339)
+	}
+
+	av, err := attributevalue.MarshalMap(item)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal lock item: %w", err)
+	}
+
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           aws.String(s.tableName),
+		Item:                av,
+		ConditionExpression: aws.String("attribute_not_exists(resource_id) OR expires_at < :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":now": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", time.Now().Unix())},
+		},
+	})
+
+	if err != nil {
+		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
+			locked, lockOwner, _ := s.IsLocked(ctx, resourceID)
+			if locked {
+				return "", fmt.Errorf("resource %s is locked by %s", resourceID, lockOwner)
+			}
+			return "", fmt.Errorf("lock condition check failed")
+		}
+		return "", fmt.Errorf("failed to acquire lock: %w", err)
+	}
+
+	log.Printf("[LOCK] Acquired lock for %s (phase: %s, step: %s, requestId: %s)", 
+		resourceID, 
+		func() string { if metadata != nil { return metadata.Phase } else { return "unknown" } }(),
+		func() string { if metadata != nil { return metadata.Step } else { return "unknown" } }(),
+		func() string { if metadata != nil { return metadata.RequestID } else { return "unknown" } }())
+
+	return token, nil
+}
+
 // ReleaseLock releases a lock using the token
 func (s *LockService) ReleaseLock(ctx context.Context, resourceID string, token string) error {
 	_, err := s.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
@@ -159,11 +220,14 @@ func (s *LockService) ReleaseLock(ctx context.Context, resourceID string, token 
 
 	if err != nil {
 		if _, ok := err.(*types.ConditionalCheckFailedException); ok {
+			log.Printf("[LOCK] Failed to release lock for %s: invalid token or lock already released", resourceID)
 			return fmt.Errorf("invalid token or lock already released")
 		}
+		log.Printf("[LOCK] Failed to release lock for %s: %v", resourceID, err)
 		return fmt.Errorf("failed to release lock: %w", err)
 	}
 
+	log.Printf("[LOCK] Released lock for %s", resourceID)
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/madhouselabs/goman/pkg/models"
 	"github.com/madhouselabs/goman/pkg/provider"
@@ -125,12 +126,20 @@ func (pb *ProviderBackend) LoadClusterState(clusterName string) (*K3sClusterStat
 						status.Phase = models.ClusterStatus("creating")
 					case "pending":
 						status.Phase = models.ClusterStatus("creating")
+					case "stopping":
+						status.Phase = models.ClusterStatus("stopping")
+					case "stopped":
+						status.Phase = models.ClusterStatus("stopped")
+					case "starting":
+						status.Phase = models.ClusterStatus("starting")
+					case "installing":
+						status.Phase = models.ClusterStatus("installing")
+					case "configuring":
+						status.Phase = models.ClusterStatus("configuring")
 					case "error":
 						status.Phase = models.ClusterStatus("error")
 					case "deleting":
 						status.Phase = models.ClusterStatus("deleting")
-					case "stopped":
-						status.Phase = models.ClusterStatus("stopped")
 					default:
 						status.Phase = models.ClusterStatus("creating")
 					}
@@ -178,6 +187,59 @@ func (pb *ProviderBackend) LoadClusterState(clusterName string) (*K3sClusterStat
 							status.Instances[k] = info
 						}
 					}
+				}
+			} else if phaseValue, hasPhase := rawStatus["phase"]; hasPhase {
+				// This is Lambda's ClusterResourceStatus format
+				status = &ClusterStatus{}
+				
+				// Map Lambda's phase to TUI's phase format
+				if phaseStr, ok := phaseValue.(string); ok {
+					switch phaseStr {
+					case "Running":
+						status.Phase = models.ClusterStatus("running")
+					case "Pending":
+						status.Phase = models.ClusterStatus("creating")
+					case "Creating":
+						status.Phase = models.ClusterStatus("creating")
+					case "Configuring":
+						status.Phase = models.ClusterStatus("configuring")
+					case "Installing":
+						status.Phase = models.ClusterStatus("installing")
+					case "Error":
+						status.Phase = models.ClusterStatus("error")
+					case "Deleting":
+						status.Phase = models.ClusterStatus("deleting")
+					default:
+						status.Phase = models.ClusterStatus("creating")
+					}
+				}
+				
+				// Extract message if available
+				if messageValue, ok := rawStatus["message"].(string); ok {
+					status.Message = messageValue
+				}
+				
+				// Map lastreconciletime to updatedAt
+				if lastReconcileValue, ok := rawStatus["lastreconciletime"]; ok {
+					if timeStr, ok := lastReconcileValue.(string); ok {
+						if parsedTime, err := time.Parse(time.RFC3339Nano, timeStr); err == nil {
+							status.UpdatedAt = parsedTime
+						}
+					}
+				}
+				
+				// Initialize empty collections to avoid nil pointer issues
+				if status.InstanceIDs == nil {
+					status.InstanceIDs = make(map[string]string)
+				}
+				if status.Instances == nil {
+					status.Instances = make(map[string]InstanceInfo)
+				}
+				if status.VolumeIDs == nil {
+					status.VolumeIDs = make(map[string][]string)
+				}
+				if status.Conditions == nil {
+					status.Conditions = []ClusterCondition{}
 				}
 			} else {
 				// Try direct unmarshal for UI-created format

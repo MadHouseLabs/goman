@@ -27,7 +27,7 @@ type ComputeService struct {
 	config          aws.Config
 	instanceProfile string
 	accountID       string
-	regionClients   map[string]*ec2.Client // Cache of region-specific EC2 clients
+	regionClients    map[string]*ec2.Client // Cache of region-specific EC2 clients
 	regionSSMClients map[string]*ssm.Client // Cache of region-specific SSM clients
 }
 
@@ -40,7 +40,7 @@ func NewComputeService(client *ec2.Client, iamClient *iam.Client, cfg aws.Config
 		config:          cfg,
 		instanceProfile: "goman-ssm-instance-profile",
 		accountID:       accountID,
-		regionClients:   make(map[string]*ec2.Client),
+		regionClients:    make(map[string]*ec2.Client),
 		regionSSMClients: make(map[string]*ssm.Client),
 	}
 }
@@ -76,6 +76,32 @@ func (s *ComputeService) getEC2Client(region string) *ec2.Client {
 	s.regionClients[region] = client
 
 	return client
+}
+
+// detectInstanceRegion detects which region an instance is in
+func (s *ComputeService) detectInstanceRegion(ctx context.Context, instanceID string) string {
+	// First try the default region (most likely case)
+	result, err := s.client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	})
+	if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+		logger.Printf("Found instance %s in default region %s", instanceID, s.config.Region)
+		return s.config.Region
+	}
+	
+	// Then check cached region clients
+	for region, client := range s.regionClients {
+		result, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+			InstanceIds: []string{instanceID},
+		})
+		if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+			logger.Printf("Found instance %s in cached region %s", instanceID, region)
+			return region
+		}
+	}
+	
+	logger.Printf("Could not detect region for instance %s", instanceID)
+	return ""
 }
 
 // getSSMClient returns an SSM client for the specified region
@@ -334,17 +360,272 @@ func (s *ComputeService) CreateInstance(ctx context.Context, config provider.Ins
 		config.InstanceProfile = s.instanceProfile
 	}
 	
-	// AWS-specific: Add UserData to ensure SSM agent is running (for Amazon Linux 2)
+	// AWS-specific: Add UserData to install K3s and ensure SSM agent is running
 	if config.UserData == "" {
-		userDataScript := `#!/bin/bash
+		// Extract cluster name and role from tags
+		clusterName := config.Tags["goman-cluster"]
+		role := config.Tags["goman-role"]
+		nodeIndex := config.Tags["goman-index"]
+		masterIP := config.Tags["goman-master-ip"] // For additional HA masters and workers
+		nodeToken := config.Tags["goman-node-token"] // For workers to join cluster
+		
+		// Build the user data script based on role
+		userDataScript := fmt.Sprintf(`#!/bin/bash
+set -e
+
+# Log startup
+echo "[$(date)] Starting instance initialization" >> /var/log/goman-startup.log
+
 # Amazon Linux 2 has SSM agent pre-installed
 # Just ensure it's enabled and running
 systemctl enable amazon-ssm-agent
 systemctl start amazon-ssm-agent
 
+# Wait for SSM agent to be ready
+sleep 10
+
+# Set up environment
+export CLUSTER_NAME="%s"
+export NODE_ROLE="%s"
+export AWS_REGION="%s"
+export S3_BUCKET="goman-%s"
+export NODE_INDEX="%s"
+export MASTER_IP="%s"
+export NODE_TOKEN="%s"
+
+echo "[$(date)] Cluster: $CLUSTER_NAME, Role: $NODE_ROLE, Index: $NODE_INDEX" >> /var/log/goman-startup.log
+
+# Install required packages
+yum update -y
+yum install -y jq
+
+# Download K3s binary from S3
+echo "[$(date)] Downloading K3s binary from S3..." >> /var/log/goman-startup.log
+# Use a specific version for now (can be made configurable later)
+K3S_VERSION="v1.31.4+k3s1"
+ARCH=$(uname -m)
+if [ "$ARCH" = "x86_64" ]; then
+    ARCH="amd64"
+elif [ "$ARCH" = "aarch64" ]; then
+    ARCH="arm64"
+fi
+
+aws s3 cp s3://$S3_BUCKET/binaries/k3s/$K3S_VERSION/k3s-$ARCH /usr/local/bin/k3s
+if [ $? -ne 0 ]; then
+    echo "[$(date)] ERROR: Failed to download K3s binary from S3" >> /var/log/goman-startup.log
+    exit 1
+fi
+chmod +x /usr/local/bin/k3s
+
+# Create symlinks for kubectl and other tools
+ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
+ln -sf /usr/local/bin/k3s /usr/local/bin/crictl
+ln -sf /usr/local/bin/k3s /usr/local/bin/ctr
+
+# Get tokens from S3
+if [ "$NODE_ROLE" = "master" ]; then
+    # Get server token from S3
+    SERVER_TOKEN=$(aws s3 cp s3://$S3_BUCKET/clusters/$CLUSTER_NAME/k3s-server-token - 2>/dev/null || echo "")
+    
+    if [ -z "$SERVER_TOKEN" ]; then
+        echo "[$(date)] ERROR: Failed to get server token from S3" >> /var/log/goman-startup.log
+        exit 1
+    fi
+    
+    # Get instance private IP
+    PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+    
+    # Determine if this is the first master or additional HA master
+    if [ "$NODE_INDEX" = "0" ] || [ -z "$MASTER_IP" ]; then
+        # First master - initialize new cluster
+        echo "[$(date)] Installing K3s server as first master..." >> /var/log/goman-startup.log
+        
+        # Check if this is HA mode by looking for a specific tag or checking node count
+        # For HA mode, we need --cluster-init to enable embedded etcd
+        CLUSTER_INIT_FLAG=""
+        if [ -n "$NODE_INDEX" ] && [ "$NODE_INDEX" = "0" ]; then
+            # This is explicitly the first master in HA mode
+            CLUSTER_INIT_FLAG="--cluster-init"
+            echo "[$(date)] Enabling embedded etcd for HA mode" >> /var/log/goman-startup.log
+        fi
+        
+        # Create K3s systemd service for first master
+        cat > /etc/systemd/system/k3s.service <<EOF
+[Unit]
+Description=Lightweight Kubernetes
+Documentation=https://k3s.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/systemd/system/k3s.service.env
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service'
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/k3s server ${CLUSTER_INIT_FLAG} --token=${SERVER_TOKEN} --node-ip=${PRIVATE_IP} --flannel-iface=eth0 --disable=traefik --disable=servicelb --disable=metrics-server --write-kubeconfig-mode=644
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Create environment file with actual values
+    cat > /etc/systemd/system/k3s.service.env <<EOF
+SERVER_TOKEN=${SERVER_TOKEN}
+PRIVATE_IP=${PRIVATE_IP}
+CLUSTER_INIT_FLAG=${CLUSTER_INIT_FLAG}
+EOF
+
+        # Start K3s server
+        systemctl daemon-reload
+        systemctl enable k3s.service
+        systemctl start k3s.service
+        
+        # Wait for K3s to be ready
+        echo "[$(date)] Waiting for K3s to be ready..." >> /var/log/goman-startup.log
+        for i in {1..60}; do
+            if kubectl get nodes >/dev/null 2>&1; then
+                echo "[$(date)] K3s is ready!" >> /var/log/goman-startup.log
+                break
+            fi
+            sleep 5
+        done
+        
+        # Save kubeconfig to S3
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then
+            # Replace localhost with instance public IP
+            PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+            sed "s/127.0.0.1/$PUBLIC_IP/g" /etc/rancher/k3s/k3s.yaml > /tmp/kubeconfig.yaml
+            aws s3 cp /tmp/kubeconfig.yaml s3://$S3_BUCKET/clusters/$CLUSTER_NAME/kubeconfig.yaml
+            echo "[$(date)] Kubeconfig saved to S3" >> /var/log/goman-startup.log
+        fi
+        
+    else
+        # Additional HA master - join existing cluster
+        echo "[$(date)] Installing K3s server as additional HA master, joining $MASTER_IP..." >> /var/log/goman-startup.log
+        
+        # Wait a bit for the first master to be fully ready
+        echo "[$(date)] Waiting 30 seconds for first master to initialize etcd..." >> /var/log/goman-startup.log
+        sleep 30
+        
+        # Create K3s systemd service for additional master
+        cat > /etc/systemd/system/k3s.service <<EOF
+[Unit]
+Description=Lightweight Kubernetes
+Documentation=https://k3s.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/systemd/system/k3s.service.env
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service'
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/k3s server --server=https://${MASTER_IP}:6443 --token=${SERVER_TOKEN} --node-ip=${PRIVATE_IP} --flannel-iface=eth0 --disable=traefik --disable=servicelb --disable=metrics-server --write-kubeconfig-mode=644
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        # Create environment file with actual values
+        cat > /etc/systemd/system/k3s.service.env <<EOF
+SERVER_TOKEN=${SERVER_TOKEN}
+PRIVATE_IP=${PRIVATE_IP}
+MASTER_IP=${MASTER_IP}
+EOF
+
+        # Start K3s server
+        systemctl daemon-reload
+        systemctl enable k3s.service
+        systemctl start k3s.service
+        
+        echo "[$(date)] K3s HA master installation initiated, joining cluster at $MASTER_IP" >> /var/log/goman-startup.log
+    fi
+    
+elif [ "$NODE_ROLE" = "worker" ]; then
+    # NODE_TOKEN and MASTER_IP are already set from environment variables
+    # They come from the EC2 tags passed to the instance
+    
+    if [ -z "$NODE_TOKEN" ]; then
+        echo "[$(date)] ERROR: Node token not provided" >> /var/log/goman-startup.log
+        exit 1
+    fi
+    
+    if [ -z "$MASTER_IP" ]; then
+        echo "[$(date)] ERROR: Master IP not configured" >> /var/log/goman-startup.log
+        exit 1
+    fi
+    
+    echo "[$(date)] Installing K3s agent to join cluster at $MASTER_IP" >> /var/log/goman-startup.log
+    
+    # Create K3s agent systemd service
+    cat > /etc/systemd/system/k3s-agent.service <<EOF
+[Unit]
+Description=Lightweight Kubernetes Agent
+Documentation=https://k3s.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/systemd/system/k3s-agent.service.env
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service'
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/k3s agent --server=https://${MASTER_IP}:6443 --token=${NODE_TOKEN}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Create environment file with actual values
+    cat > /etc/systemd/system/k3s-agent.service.env <<EOF
+MASTER_IP=${MASTER_IP}
+NODE_TOKEN=${NODE_TOKEN}
+EOF
+    
+    # Start K3s agent
+    systemctl daemon-reload
+    systemctl enable k3s-agent.service
+    systemctl start k3s-agent.service
+    
+    echo "[$(date)] K3s agent installation initiated" >> /var/log/goman-startup.log
+fi
+
+echo "[$(date)] K3s installation completed" >> /var/log/goman-startup.log
+
 # Log for debugging
 echo "Instance started at $(date)" >> /var/log/instance-startup.log
-`
+`, clusterName, role, config.Region, s.accountID, nodeIndex, masterIP, nodeToken)
+		
 		config.UserData = base64.StdEncoding.EncodeToString([]byte(userDataScript))
 	}
 
@@ -406,16 +687,11 @@ func (s *ComputeService) DeleteInstance(ctx context.Context, instanceID string) 
 	// Try to find which region the instance is in by checking our cached clients
 	ec2Client := s.client // Default to main client
 
-	// Try to find the instance in cached regions
-	for region, client := range s.regionClients {
-		result, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: []string{instanceID},
-		})
-		if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
-			ec2Client = client
-			logger.Printf("Found instance %s in region %s", instanceID, region)
-			break
-		}
+	// Detect instance region
+	instanceRegion := s.detectInstanceRegion(ctx, instanceID)
+	if instanceRegion != "" && instanceRegion != s.config.Region {
+		ec2Client = s.getEC2Client(instanceRegion)
+		logger.Printf("Using region-specific client for instance %s in %s", instanceID, instanceRegion)
 	}
 
 	// If not found in cached regions, try with default client
@@ -579,16 +855,11 @@ func (s *ComputeService) ModifyInstanceType(ctx context.Context, instanceID stri
 	// Try to find which region the instance is in
 	ec2Client := s.client
 
-	// Try to find the instance in cached regions
-	for region, client := range s.regionClients {
-		result, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: []string{instanceID},
-		})
-		if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
-			ec2Client = client
-			logger.Printf("Found instance %s in region %s for modification", instanceID, region)
-			break
-		}
+	// Detect instance region
+	instanceRegion := s.detectInstanceRegion(ctx, instanceID)
+	if instanceRegion != "" && instanceRegion != s.config.Region {
+		ec2Client = s.getEC2Client(instanceRegion)
+		logger.Printf("Using region-specific client for instance %s modification in %s", instanceID, instanceRegion)
 	}
 
 	// Modify the instance attribute
@@ -879,17 +1150,7 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 
 	// Detect the region of the first instance
 	// Assume all instances in the same command are in the same region
-	instanceRegion := ""
-	for region, client := range s.regionClients {
-		result, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: []string{instanceIDs[0]},
-		})
-		if err == nil && len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
-			instanceRegion = region
-			logger.Printf("Detected instance %s in region %s", instanceIDs[0], region)
-			break
-		}
-	}
+	instanceRegion := s.detectInstanceRegion(ctx, instanceIDs[0])
 
 	// Get the appropriate SSM client for the region
 	var ssmClient *ssm.Client
@@ -990,4 +1251,140 @@ func (s *ComputeService) RunCommand(ctx context.Context, instanceIDs []string, c
 			}
 		}
 	}
+}
+
+// StartCommand starts a command on instances without waiting for completion (non-blocking)
+func (s *ComputeService) StartCommand(ctx context.Context, instanceIDs []string, command string) (string, error) {
+	if len(instanceIDs) == 0 {
+		return "", fmt.Errorf("no instance IDs provided")
+	}
+
+	// Detect the region of the first instance
+	instanceRegion := s.detectInstanceRegion(ctx, instanceIDs[0])
+
+	// Get the appropriate SSM client for the region
+	var ssmClient *ssm.Client
+	if instanceRegion != "" {
+		ssmClient = s.getSSMClient(instanceRegion)
+	} else {
+		logger.Printf("Could not detect region for instance %s, using default SSM client", instanceIDs[0])
+		ssmClient = s.ssmClient
+	}
+
+	// Check if SSM client is initialized
+	if ssmClient == nil {
+		return "", fmt.Errorf("SSM client not initialized - Systems Manager support not available")
+	}
+
+	// Send command to instances
+	result, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:  instanceIDs,
+		DocumentName: aws.String("AWS-RunShellScript"),
+		Parameters: map[string][]string{
+			"commands": {command},
+		},
+		TimeoutSeconds: aws.Int32(600), // 10 minutes timeout (increased)
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("failed to send command: %w", err)
+	}
+
+	commandID := aws.ToString(result.Command.CommandId)
+	logger.Printf("Started command %s on instances %v", commandID, instanceIDs)
+	
+	return commandID, nil
+}
+
+// GetCommandResult checks the status of a previously started command
+func (s *ComputeService) GetCommandResult(ctx context.Context, commandID string) (*provider.CommandResult, error) {
+	if commandID == "" {
+		return nil, fmt.Errorf("command ID cannot be empty")
+	}
+
+	// Try all SSM clients to find the command (it could be in any region)
+	var ssmClient *ssm.Client
+	var invocations *ssm.ListCommandInvocationsOutput
+	var err error
+
+	// First try the default client
+	if s.ssmClient != nil {
+		invocations, err = s.ssmClient.ListCommandInvocations(ctx, &ssm.ListCommandInvocationsInput{
+			CommandId: aws.String(commandID),
+		})
+		if err == nil && len(invocations.CommandInvocations) > 0 {
+			ssmClient = s.ssmClient
+		}
+	}
+
+	// If not found, try other region clients
+	if ssmClient == nil {
+		for _, client := range s.regionSSMClients {
+			invocations, err = client.ListCommandInvocations(ctx, &ssm.ListCommandInvocationsInput{
+				CommandId: aws.String(commandID),
+			})
+			if err == nil && len(invocations.CommandInvocations) > 0 {
+				ssmClient = client
+				break
+			}
+		}
+	}
+
+	if ssmClient == nil || invocations == nil {
+		// Use a retryable error message - SSM commands may take time to appear in API
+		return nil, fmt.Errorf("SSM command %s timeout - command may still be initializing in AWS API", commandID)
+	}
+
+	// Build result
+	cmdResult := &provider.CommandResult{
+		CommandID: commandID,
+		Status:    "Success",
+		Instances: make(map[string]*provider.InstanceCommandResult),
+	}
+
+	allComplete := true
+	for _, inv := range invocations.CommandInvocations {
+		instanceID := aws.ToString(inv.InstanceId)
+		status := string(inv.Status)
+
+		if status == "InProgress" || status == "Pending" {
+			allComplete = false
+			cmdResult.Status = "InProgress"
+			cmdResult.Instances[instanceID] = &provider.InstanceCommandResult{
+				InstanceID: instanceID,
+				Status:     status,
+			}
+			continue
+		}
+
+		// Get command output for completed commands
+		output, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+			CommandId:  aws.String(commandID),
+			InstanceId: aws.String(instanceID),
+		})
+
+		instanceResult := &provider.InstanceCommandResult{
+			InstanceID: instanceID,
+			Status:     status,
+		}
+
+		if err == nil {
+			instanceResult.Output = aws.ToString(output.StandardOutputContent)
+			instanceResult.Error = aws.ToString(output.StandardErrorContent)
+			instanceResult.ExitCode = int(output.ResponseCode)
+		}
+
+		cmdResult.Instances[instanceID] = instanceResult
+
+		if status != "Success" {
+			cmdResult.Status = "Failed"
+		}
+	}
+
+	// If any commands are still in progress, return InProgress status
+	if !allComplete {
+		cmdResult.Status = "InProgress"
+	}
+
+	return cmdResult, nil
 }

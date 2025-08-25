@@ -270,6 +270,7 @@ func (m *Manager) UpdateCluster(cluster models.K3sCluster) (*models.K3sCluster, 
 			m.clusters[i].Description = cluster.Description
 			m.clusters[i].Region = cluster.Region
 			m.clusters[i].InstanceType = cluster.InstanceType
+			m.clusters[i].NodePools = cluster.NodePools  // Update NodePools
 			m.clusters[i].UpdatedAt = time.Now()
 			found = true
 			cluster = m.clusters[i]
@@ -368,36 +369,68 @@ func (m *Manager) DeleteCluster(clusterID string) error {
 	return fmt.Errorf("cluster not found: %s", clusterID)
 }
 
-// StartCluster starts a stopped cluster
+// StartCluster starts all stopped VMs in a cluster
 func (m *Manager) StartCluster(clusterID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for i := range m.clusters {
-		if m.clusters[i].ID == clusterID {
+		if m.clusters[i].ID == clusterID || m.clusters[i].Name == clusterID {
 			if m.clusters[i].Status != models.StatusStopped {
-				return fmt.Errorf("cluster is not stopped")
+				return fmt.Errorf("cluster is not in stopped state (current: %s)", m.clusters[i].Status)
 			}
-			m.clusters[i].Status = models.StatusRunning
+			
+			// Update status and desired state
+			m.clusters[i].Status = models.StatusStarting
+			m.clusters[i].DesiredState = "running"
 			m.clusters[i].UpdatedAt = time.Now()
+			
+			// Save config with desired state to trigger Lambda
+			if m.storage != nil {
+				if err := m.saveClusterConfig(m.clusters[i]); err != nil {
+					return fmt.Errorf("failed to save cluster config: %w", err)
+				}
+				// Also update status immediately so UI shows correct state
+				if err := m.saveClusterStatus(m.clusters[i]); err != nil {
+					// Log but don't fail - Lambda will update status anyway
+					fmt.Printf("Warning: failed to save immediate status update: %v\n", err)
+				}
+			}
+			
 			return nil
 		}
 	}
 	return fmt.Errorf("cluster not found: %s", clusterID)
 }
 
-// StopCluster stops a running cluster
+// StopCluster stops all running VMs in a cluster
 func (m *Manager) StopCluster(clusterID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for i := range m.clusters {
-		if m.clusters[i].ID == clusterID {
+		if m.clusters[i].ID == clusterID || m.clusters[i].Name == clusterID {
 			if m.clusters[i].Status != models.StatusRunning {
-				return fmt.Errorf("cluster is not running")
+				return fmt.Errorf("cluster is not in running state (current: %s)", m.clusters[i].Status)
 			}
-			m.clusters[i].Status = models.StatusStopped
+			
+			// Update status and desired state
+			m.clusters[i].Status = models.StatusStopping
+			m.clusters[i].DesiredState = "stopped"
 			m.clusters[i].UpdatedAt = time.Now()
+			
+			// Save config with desired state to trigger Lambda
+			if m.storage != nil {
+				if err := m.saveClusterConfig(m.clusters[i]); err != nil {
+					return fmt.Errorf("failed to save cluster config: %w", err)
+				}
+				// Also update status immediately so UI shows correct state
+				if err := m.saveClusterStatus(m.clusters[i]); err != nil {
+					// Log but don't fail - Lambda will update status anyway
+					fmt.Printf("Warning: failed to save immediate status update: %v\n", err)
+				}
+			}
+			
 			return nil
 		}
 	}
@@ -640,6 +673,61 @@ func (m *Manager) saveClusterConfig(cluster models.K3sCluster) error {
 	// Use the backend directly to save the raw data
 	backend := m.storage.GetBackend()
 	return backend.PutObject(configKey, data)
+}
+
+// saveClusterStatus saves cluster status immediately (for UI responsiveness)
+func (m *Manager) saveClusterStatus(cluster models.K3sCluster) error {
+	if m.storage == nil {
+		return nil
+	}
+
+	// Create status structure in Lambda format
+	statusState := make(map[string]interface{})
+	
+	// Map status to Lambda format
+	var statusStr string
+	switch cluster.Status {
+	case models.StatusRunning:
+		statusStr = "running"
+	case models.StatusStopping:
+		statusStr = "stopping"
+	case models.StatusStopped:
+		statusStr = "stopped"
+	case models.StatusStarting:
+		statusStr = "starting"
+	case models.StatusCreating:
+		statusStr = "creating"
+	case models.StatusDeleting:
+		statusStr = "deleting"
+	case models.StatusError:
+		statusStr = "error"
+	default:
+		statusStr = "pending"
+	}
+	
+	statusState["cluster"] = map[string]interface{}{
+		"status":     statusStr,
+		"updated_at": time.Now().Format(time.RFC3339),
+	}
+	
+	// Add minimal metadata
+	statusState["metadata"] = map[string]interface{}{
+		"last_updated_by": "ui",
+		"message": fmt.Sprintf("Status updated by UI to %s", statusStr),
+	}
+	
+	// Save to status.yaml file
+	statusKey := fmt.Sprintf("clusters/%s/status.yaml", cluster.Name)
+	
+	// Marshal as YAML
+	data, err := yaml.Marshal(statusState)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status: %w", err)
+	}
+	
+	// Use the backend directly to save the raw data
+	backend := m.storage.GetBackend()
+	return backend.PutObject(statusKey, data)
 }
 
 

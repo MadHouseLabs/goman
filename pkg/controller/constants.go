@@ -1,6 +1,8 @@
 package controller
 
-import "time"
+import (
+	"time"
+)
 
 // Timeout constants
 const (
@@ -10,7 +12,7 @@ const (
 	// LockAcquireTimeout is the timeout for acquiring a distributed lock
 	LockAcquireTimeout = 30 * time.Second
 	
-	// LockTTL is the time-to-live for a distributed lock
+	// LockTTL is the default time-to-live for a distributed lock
 	LockTTL = 5 * time.Minute
 	
 	// LockRenewInterval is how often to renew the lock during long operations
@@ -26,13 +28,28 @@ const (
 	DeleteInstanceTimeout = 30 * time.Second
 )
 
+// Phase-specific lock TTLs for optimized lock management
+const (
+	// Quick phases - operations that should complete in seconds
+	LockTTLQuick = 30 * time.Second  // Pending, Failed, Stopped, Running health checks
+	
+	// Medium phases - operations that may take a minute or two  
+	LockTTLMedium = 2 * time.Minute // Provisioning, Starting, Stopping
+	
+	// Long phases - operations that can take several minutes
+	LockTTLLong = 3 * time.Minute   // Installing, Configuring
+	
+	// Emergency phases - operations that need extra time
+	LockTTLEmergency = 5 * time.Minute // Deleting, complex recovery operations
+)
+
 // Retry constants
 const (
 	// MaxProvisionRetries is the maximum number of provisioning attempts
 	MaxProvisionRetries = 10
 	
 	// LockedClusterRetryInterval is how long to wait before retrying a locked cluster
-	LockedClusterRetryInterval = 30 * time.Second
+	LockedClusterRetryInterval = 20 * time.Second
 )
 
 // Requeue intervals
@@ -44,13 +61,13 @@ const (
 	ProvisioningRequeuInterval = 10 * time.Second
 	
 	// RunningRecheckInterval is how often to check running clusters
-	RunningRecheckInterval = 60 * time.Second
+	RunningRecheckInterval = 45 * time.Second
 	
 	// DeletingRecheckInterval is how often to check deletion progress
-	DeletingRecheckInterval = 20 * time.Second
+	DeletingRecheckInterval = 15 * time.Second
 	
 	// FailedRetryInterval is how long to wait before retrying a failed cluster
-	FailedRetryInterval = 30 * time.Second
+	FailedRetryInterval = 20 * time.Second
 )
 
 // Instance management constants

@@ -67,9 +67,11 @@ func getStatusColor(status string) tcell.Color {
 	switch status {
 	case "running":
 		return ColorSuccess
-	case "creating", "updating":
+	case "creating", "updating", "starting", "stopping":
 		return ColorWarning
-	case "error", "failed":
+	case "stopped":
+		return ColorMuted
+	case "error", "failed", "deleting":
 		return ColorDanger
 	default:
 		return ColorMuted
